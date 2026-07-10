@@ -9,8 +9,8 @@ validate_system_section() {
 		'hostname:string:OpenWrt' \
 		'conloglevel:uinteger' \
 		'buffersize:uinteger' \
-		'timezone:string:GMT0' \
-		'zonename:string:UTC'
+		'timezone:string:CST-8' \
+		'zonename:string:Asia/Shanghai'
 }
 
 system_config() {
