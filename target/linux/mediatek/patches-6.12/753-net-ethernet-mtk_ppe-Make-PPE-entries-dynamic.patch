@@ -93,7 +93,7 @@ index ca18dd7..c14c13e 100644
 +		mib = dmam_alloc_coherent(ppe->dev, ppe->foe_entries * sizeof(*mib),
  					  &ppe->mib_phys, GFP_KERNEL);
  		if (!mib)
- 			return NULL;
+ 			goto err_free_l2_flows;
  
 -		memset(mib, 0, MTK_PPE_ENTRIES * sizeof(*mib));
 +		memset(mib, 0, ppe->foe_entries * sizeof(*mib));
