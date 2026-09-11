@@ -1,0 +1,917 @@
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1949,6 +1949,13 @@ config CMD_WGET
+ 	  Download a image via HTTP or HTTPS and store it to memory
+ 	  after a successful download.
+ 
++config CMD_HTTPD
++	bool "httpd - Web Failsafe HTTP Server"
++	default n
++	help
++	  Lightweight embedded Web Failsafe HTTP server for firmware recovery
++	  and web flashing via browser.
++
+ config CMD_MII
+ 	bool "mii - Low-level MII PHY control commands"
+ 	help
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -107,6 +107,7 @@ obj-$(CONFIG_CMD_GPIO) += gpio.o
+ obj-$(CONFIG_CMD_HVC) += smccc.o
+ obj-$(CONFIG_CMD_I2C) += i2c.o
+ obj-$(CONFIG_CMD_IOTRACE) += iotrace.o
++obj-$(CONFIG_CMD_HTTPD) += httpd.o
+ obj-$(CONFIG_CMD_HASH) += hash.o
+ obj-$(CONFIG_CMD_IDE) += ide.o
+ obj-$(CONFIG_CMD_IMX8) += imx8.o
+--- /dev/null
++++ b/cmd/httpd.c
+@@ -0,0 +1,50 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 Dante <dante@seckv.com>
++ * Web Failsafe Command for BPi-R4 and MediaTek Platforms
++ */
++
++#include <common.h>
++#include <command.h>
++#include <net.h>
++#include <net/httpd.h>
++
++static int do_httpd(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
++{
++	char *ip;
++
++	ip = env_get("ipaddr");
++	if (!ip) {
++		env_set("ipaddr", "192.168.1.1");
++		ip = "192.168.1.1";
++	}
++
++	printf("\n=======================================================\n");
++	printf("  Banana Pi BPi-R4 Web Failsafe HTTP Recovery Server\n");
++	printf("  Web UI Address: http://%s/\n", ip);
++	printf("  Please connect PC to LAN port and configure static IP:\n");
++	printf("    IP: 192.168.1.2  /  Subnet: 255.255.255.0\n");
++	printf("  Press Ctrl+C to abort and return to console.\n");
++	printf("=======================================================\n\n");
++
++	if (net_loop(HTTPD) < 0) {
++		printf("HTTPD: Network loop terminated or failed.\n");
++		return CMD_RET_FAILURE;
++	}
++
++	return CMD_RET_SUCCESS;
++}
++
++U_BOOT_CMD(
++	httpd, 1, 1, do_httpd,
++	"Start Web Failsafe HTTP recovery server",
++	"\n    - Starts mini HTTP server on port 80 to flash firmware via web browser\n"
++);
++
+--- a/include/net.h
++++ b/include/net.h
+@@ -539,6 +539,7 @@ enum proto_t {
+ 	FASTBOOT_UDP,
+ 	FASTBOOT_TCP,
+ 	WGET,
++	HTTPD,
+ };
+ 
+ extern char	net_boot_file_name[1024];/* Boot File name */
+--- a/net/Makefile
++++ b/net/Makefile
+@@ -37,6 +37,7 @@ obj-$(CONFIG_CMD_WGET) += wget.o
+ obj-$(CONFIG_CMD_WGET) += tcp.o
+ obj-$(CONFIG_PROT_TCP) += tcp.o
+ obj-$(CONFIG_CMD_MDIO) += mdio.o
++obj-$(CONFIG_CMD_HTTPD) += httpd.o uip.o uip_arp.o
+ 
+ # Disable this warning as it is triggered by:
+ # sprintf(cmd, "setenv emerg %lX", ncip.s_addr);
+--- a/net/net.c
++++ b/net/net.c
+@@ -107,6 +107,7 @@
+ #include <net/sntp.h>
+ #include <net/tftp.h>
+ #include <net/tcp.h>
++#include <net/httpd.h>
+ #if defined(CONFIG_CMD_WOL)
+ #include <net/wol.h>
+ #endif
+@@ -485,6 +486,11 @@ restart:
+ 		case WGET:
+ 			wget_start();
+ 			break;
++#endif
++#if defined(CONFIG_CMD_HTTPD)
++		case HTTPD:
++			httpd_start();
++			break;
+ #endif
+ 		default:
+ 			break;
+@@ -628,6 +634,11 @@ restart:
+ 		}
+ 
+ 		eth_rx();
++
++#if defined(CONFIG_CMD_HTTPD)
++		if (net_state == NETLOOP_LOOP && protocol == HTTPD)
++			httpd_poll();
++#endif
+ 
+ 		/*
+ 		 *	Check for a timeout, and run the timeout handler
+@@ -1245,6 +1256,12 @@ void net_process_received_packet(uchar *
+ 		net_set_state(NETLOOP_FAIL);
+ 		return;
+ 	}
++
++#if defined(CONFIG_CMD_HTTPD)
++	if (httpd_is_active()) {
++		httpd_rx(in_packet, len);
++	}
++#endif
+ 
+ 	eth_hdr = (struct ethernet_hdr *)in_packet;
+ 	eth_proto = ntohs(eth_hdr->et_protlen);
+--- /dev/null
++++ b/include/net/httpd.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Web Failsafe HTTP Daemon Header
++ */
++
++#ifndef __NET_HTTPD_H__
++#define __NET_HTTPD_H__
++
++#include <common.h>
++#include <net.h>
++
++void httpd_start(void);
++void httpd_poll(void);
++void httpd_rx(uchar *pkt, int len);
++int httpd_is_active(void);
++void httpd_stop(void);
++
++#define HTTPD_MAX_DATA_SIZE	0x8000000 /* 128MB max upload buffer */
++
++#endif /* __NET_HTTPD_H__ */
++
+--- /dev/null
++++ b/include/net/uip_arp.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++#ifndef __UIP_ARP_H__
++#define __UIP_ARP_H__
++
++#include <net/uip.h>
++
++struct uip_eth_hdr {
++	struct uip_eth_addr dest;
++	struct uip_eth_addr src;
++	u16_t type;
++};
++
++#define UIP_ETHTYPE_ARP 0x0806
++#define UIP_ETHTYPE_IP  0x0800
++
+ struct arp_hdr {
++	struct uip_eth_hdr ethhdr;
++	u16_t hwtype;
++	u16_t protocol;
++	u8_t hwlen;
++	u8_t protolen;
++	u16_t opcode;
++	struct uip_eth_addr shwaddr;
++	u16_t sipaddr[2];
++	struct uip_eth_addr dhwaddr;
++	u16_t dipaddr[2];
++};
++
++#define ARP_REQUEST 1
++#define ARP_REPLY   2
++
++#define ARP_HWTYPE_ETH 1
++
++void uip_arp_init(void);
++void uip_arp_ipin(void);
++void uip_arp_arpin(void);
++void uip_arp_out(void);
++#endif
+--- /dev/null
++++ b/include/net/uip.h
+@@ -0,0 +1,155 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/*
++ * Minimal uIP TCP/IP stack definitions for U-Boot HTTPD
++ */
++
++#ifndef __UIP_H__
++#define __UIP_H__
++
++#include <linux/types.h>
++
++typedef u8  u8_t;
++typedef u16 u16_t;
++typedef u32 u32_t;
++
++typedef u16_t uip_ip4addr_t[2];
++typedef u16_t uip_ipaddr_t[2];
++
++#define uip_ipaddr(addr, addr0, addr1, addr2, addr3) do { \
++	((u16_t *)(addr))[0] = htons(((addr0) << 8) | (addr1)); \
++	((u16_t *)(addr))[1] = htons(((addr2) << 8) | (addr3)); \
++} while (0)
++
++#define uip_ipaddr_copy(dest, src) do { \
++	((u16_t *)(dest))[0] = ((u16_t *)(src))[0]; \
++	((u16_t *)(dest))[1] = ((u16_t *)(src))[1]; \
++} while (0)
++
++#define uip_ipaddr_cmp(addr1, addr2) \
++	(((u16_t *)(addr1))[0] == ((u16_t *)(addr2))[0] && \
++	 ((u16_t *)(addr1))[1] == ((u16_t *)(addr2))[1])
++
++struct uip_eth_addr {
++	u8_t addr[6];
++};
++
++struct uip_tcp_conn {
++	uip_ipaddr_t ripaddr;
++	u16_t lport;
++	u16_t rport;
++	u8_t rcv_nxt[4];
++	u8_t snd_nxt[4];
++	u16_t len;
++	u32_t timer;
++	u8_t tcpstateflags;
++	void *appstate;
++};
++
++#define UIP_TCP_CONNS 4
++#define UIP_BUFSIZE   1514
++
++#define UIP_LLH_LEN   14
++#define UIP_IPH_LEN   20
++#define UIP_TCPH_LEN  20
++#define UIP_IPTCPH_LEN (UIP_IPH_LEN + UIP_TCPH_LEN)
++
++extern u8_t uip_buf[UIP_BUFSIZE + 2];
++extern void *uip_appdata;
++extern u16_t uip_len;
++extern u16_t uip_slen;
++extern u8_t uip_flags;
++extern struct uip_tcp_conn *uip_conn;
++extern struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++
++/* uIP flags */
++#define UIP_ACKDATA     0x01
++#define UIP_NEWDATA     0x02
++#define UIP_CLOSE       0x04
++#define UIP_ABORT       0x08
++#define UIP_CONNECTED   0x10
++#define UIP_TIMEDOUT    0x20
++#define UIP_POLL        0x40
++
++#define uip_newdata()           (uip_flags & UIP_NEWDATA)
++#define uip_acked()             (uip_flags & UIP_ACKDATA)
++#define uip_connected()         (uip_flags & UIP_CONNECTED)
++#define uip_closed()            (uip_flags & UIP_CLOSE)
++#define uip_aborted()           (uip_flags & UIP_ABORT)
++#define uip_timedout()          (uip_flags & UIP_TIMEDOUT)
++#define uip_poll()              (uip_flags & UIP_POLL)
++#define uip_datalen()           uip_len
++
++#define uip_send(buf, len) do { \
++	uip_appdata = (buf); \
++	uip_slen = (len); \
++} while (0)
++
++#define uip_close() do { \
++	uip_flags |= UIP_CLOSE; \
++} while (0)
++
++#define uip_abort() do { \
++	uip_flags |= UIP_ABORT; \
++} while (0)
++
++/* IP / TCP Headers */
++struct uip_tcpip_hdr {
++	u8_t vhl, tos, len[2], ipid[2], ipoffset[2], ttl, proto;
++	u16_t ipchksum;
++	u16_t srcipaddr[2], destipaddr[2];
++	u16_t srcport, destport;
++	u8_t seqno[4], ackno[4], tcpoffset, flags, wnd[2];
++	u16_t tcpchksum;
++	u8_t urgp[2];
++};
++
++#define UIP_PROTO_ICMP  1
++#define UIP_PROTO_TCP   6
++#define UIP_PROTO_UDP   17
++
++#define TCP_FIN 0x01
++#define TCP_SYN 0x02
++#define TCP_RST 0x04
++#define TCP_PSH 0x08
++#define TCP_ACK 0x10
++#define TCP_URG 0x20
++#define TCP_CTL 0x3f
++
++#define UIP_CLOSED      0
++#define UIP_SYN_RCVD    1
++#define UIP_SYN_SENT    2
++#define UIP_ESTABLISHED 3
++#define UIP_FIN_WAIT_1  4
++#define UIP_FIN_WAIT_2  5
++#define UIP_CLOSING     6
++#define UIP_TIME_WAIT   7
++#define UIP_LAST_ACK    8
++
++void uip_init(void);
++void uip_sethostaddr(uip_ipaddr_t addr);
++void uip_setnetmask(uip_ipaddr_t addr);
++void uip_setdraddr(uip_ipaddr_t addr);
++void uip_setethaddr(struct uip_eth_addr addr);
++void uip_input(void);
++void uip_periodic(int conn);
++void uip_listen(u16_t port);
++void uip_appcall(void);
++
++u16_t uip_chksum(u16_t *buf, u16_t len);
++u16_t uip_ipchksum(void);
++u16_t uip_tcpchksum(void);
++
++#endif
+--- /dev/null
++++ b/net/uip_arp.c
+@@ -0,0 +1,114 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Minimal ARP implementation for uIP
++ */
++
++#include <common.h>
++#include <net/uip.h>
++#include <net/uip_arp.h>
++
++static struct uip_eth_addr ethaddr;
++static uip_ipaddr_t hostaddr;
++
++#define BUF ((struct arp_hdr *)&uip_buf[0])
++#define IPBUF ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
++
++void uip_arp_init(void)
++{
++}
++
++void uip_setethaddr(struct uip_eth_addr addr)
++{
++	ethaddr = addr;
++}
++
++void uip_sethostaddr(uip_ipaddr_t addr)
++{
++	uip_ipaddr_copy(hostaddr, addr);
++}
++
++void uip_arp_arpin(void)
++{
++	if (uip_len < sizeof(struct arp_hdr)) {
++		uip_len = 0;
++		return;
++	}
++
++	uip_len = 0;
++	switch (BUF->opcode) {
++	case htons(ARP_REQUEST):
++		if (uip_ipaddr_cmp(BUF->dipaddr, hostaddr)) {
++			BUF->opcode = htons(ARP_REPLY);
++			memcpy(BUF->dhwaddr.addr, BUF->shwaddr.addr, 6);
++			memcpy(BUF->shwaddr.addr, ethaddr.addr, 6);
++			memcpy(BUF->ethhdr.src.addr, ethaddr.addr, 6);
++			memcpy(BUF->ethhdr.dest.addr, BUF->dhwaddr.addr, 6);
++
++			BUF->dipaddr[0] = BUF->sipaddr[0];
++			BUF->dipaddr[1] = BUF->sipaddr[1];
++			BUF->sipaddr[0] = hostaddr[0];
++			BUF->sipaddr[1] = hostaddr[1];
++
++			BUF->ethhdr.type = htons(UIP_ETHTYPE_ARP);
++			uip_len = sizeof(struct arp_hdr);
++		}
++		break;
++	default:
++		break;
++	}
++}
++
++void uip_arp_ipin(void)
++{
++}
++
++void uip_arp_out(void)
++{
++	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)&uip_buf[0];
++	struct arp_hdr *arp = (struct arp_hdr *)&uip_buf[0];
++
++	if (eth->type == htons(UIP_ETHTYPE_ARP))
++		return;
++
++	memcpy(eth->src.addr, ethaddr.addr, 6);
++	/* Reply to the client that connected to us */
++	memcpy(eth->dest.addr, arp->dhwaddr.addr, 6);
++	eth->type = htons(UIP_ETHTYPE_IP);
++	uip_len += UIP_LLH_LEN;
++}
+--- /dev/null
++++ b/net/uip.c
+@@ -0,0 +1,288 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Minimal uIP TCP State Machine Implementation
++ */
++
++#include <common.h>
++#include <net/uip.h>
++#include <net/uip_arp.h>
++
++u8_t uip_buf[UIP_BUFSIZE + 2];
++void *uip_appdata;
++u16_t uip_len;
++u16_t uip_slen;
++u8_t uip_flags;
++struct uip_tcp_conn *uip_conn;
++struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++
++static u16_t uip_listenport;
++static u16_t ipid;
++
++#define BUF ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
++
++u16_t uip_chksum(u16_t *buf, u16_t len)
++{
++	u32_t sum = 0;
++	while (len > 1) {
++		sum += *buf++;
++		len -= 2;
++	}
++	if (len == 1)
++		sum += *(u8_t *)buf;
++	while (sum >> 16)
++		sum = (sum & 0xffff) + (sum >> 16);
++	return (u16_t)~sum;
++}
++
++u16_t uip_ipchksum(void)
++{
++	return uip_chksum((u16_t *)&uip_buf[UIP_LLH_LEN], 20);
++}
++
++u16_t uip_tcpchksum(void)
++{
++	u16_t hlen = 40;
++	u32_t sum = 0;
++	u16_t tlen = uip_len - 20;
++
++	sum += BUF->srcipaddr[0];
++	sum += BUF->srcipaddr[1];
++	sum += BUF->destipaddr[0];
++	sum += BUF->destipaddr[1];
++	sum += htons(UIP_PROTO_TCP);
++	sum += htons(tlen);
++
++	u16_t *p = (u16_t *)&uip_buf[UIP_LLH_LEN + 20];
++	while (tlen > 1) {
++		sum += *p++;
++		tlen -= 2;
++	}
++	if (tlen == 1)
++		sum += *(u8_t *)p;
++	while (sum >> 16)
++		sum = (sum & 0xffff) + (sum >> 16);
++	return (u16_t)~sum;
++}
++
++void uip_init(void)
++{
++	int i;
++	for (i = 0; i < UIP_TCP_CONNS; ++i)
++		uip_conns[i].tcpstateflags = UIP_CLOSED;
++	uip_listenport = 0;
++}
++
++void uip_listen(u16_t port)
++{
++	uip_listenport = port;
++}
++
++static void uip_add_ack(u32_t seq, u32_t ack)
++{
++	BUF->seqno[0] = seq >> 24;
++	BUF->seqno[1] = seq >> 16;
++	BUF->seqno[2] = seq >> 8;
++	BUF->seqno[3] = seq;
++
++	BUF->ackno[0] = ack >> 24;
++	BUF->ackno[1] = ack >> 16;
++	BUF->ackno[2] = ack >> 8;
++	BUF->ackno[3] = ack;
++}
++
++void uip_input(void)
++{
++	u16_t len;
++
++	if (BUF->vhl != 0x45 || BUF->proto != UIP_PROTO_TCP) {
++		uip_len = 0;
++		return;
++	}
++
++	/* Match connection */
++	uip_conn = NULL;
++	for (int i = 0; i < UIP_TCP_CONNS; ++i) {
++		if (uip_conns[i].tcpstateflags != UIP_CLOSED &&
++		    BUF->destport == uip_conns[i].lport &&
++		    BUF->srcport == uip_conns[i].rport &&
++		    uip_ipaddr_cmp(BUF->srcipaddr, uip_conns[i].ripaddr)) {
++			uip_conn = &uip_conns[i];
++			break;
++		}
++	}
++
++	/* New incoming connection */
++	if (!uip_conn) {
++		if (BUF->flags != TCP_SYN || BUF->destport != htons(uip_listenport)) {
++			uip_len = 0;
++			return;
++		}
++		for (int i = 0; i < UIP_TCP_CONNS; ++i) {
++			if (uip_conns[i].tcpstateflags == UIP_CLOSED) {
++				uip_conn = &uip_conns[i];
++				break;
++			}
++		}
++		if (!uip_conn) {
++			uip_len = 0;
++			return;
++		}
++		uip_conn->lport = BUF->destport;
++		uip_conn->rport = BUF->srcport;
++		uip_ipaddr_copy(uip_conn->ripaddr, BUF->srcipaddr);
++		uip_conn->tcpstateflags = UIP_SYN_RCVD;
++
++		u32_t r_seq = ((u32_t)BUF->seqno[0] << 24) | ((u32_t)BUF->seqno[1] << 16) |
++			      ((u32_t)BUF->seqno[2] << 8) | BUF->seqno[3];
++		u32_t l_seq = 0x12345678;
++
++		uip_add_ack(l_seq, r_seq + 1);
++		BUF->flags = TCP_SYN | TCP_ACK;
++		BUF->tcpoffset = (UIP_TCPH_LEN / 4) << 4;
++		BUF->wnd[0] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) >> 8;
++		BUF->wnd[1] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) & 0xff;
++
++		uip_conn->snd_nxt[0] = (l_seq + 1) >> 24;
++		uip_conn->snd_nxt[1] = (l_seq + 1) >> 16;
++		uip_conn->snd_nxt[2] = (l_seq + 1) >> 8;
++		uip_conn->snd_nxt[3] = (l_seq + 1);
++
++		uip_conn->rcv_nxt[0] = (r_seq + 1) >> 24;
++		uip_conn->rcv_nxt[1] = (r_seq + 1) >> 16;
++		uip_conn->rcv_nxt[2] = (r_seq + 1) >> 8;
++		uip_conn->rcv_nxt[3] = (r_seq + 1);
++
++		goto send_pkt;
++	}
++
++	/* Established state */
++	u32_t cur_seq = ((u32_t)BUF->seqno[0] << 24) | ((u32_t)BUF->seqno[1] << 16) |
++			((u32_t)BUF->seqno[2] << 8) | BUF->seqno[3];
++	u32_t cur_ack = ((u32_t)BUF->ackno[0] << 24) | ((u32_t)BUF->ackno[1] << 16) |
++			((u32_t)BUF->ackno[2] << 8) | BUF->ackno[3];
++
++	if (BUF->flags & TCP_RST) {
++		uip_conn->tcpstateflags = UIP_CLOSED;
++		uip_len = 0;
++		return;
++	}
++
++	if (uip_conn->tcpstateflags == UIP_SYN_RCVD) {
++		if (BUF->flags & TCP_ACK) {
++			uip_conn->tcpstateflags = UIP_ESTABLISHED;
++		}
++	}
++
++	len = (BUF->len[0] << 8) | BUF->len[1];
++	len -= (BUF->vhl & 0x0f) * 4 + ((BUF->tcpoffset >> 4) * 4);
++
++	uip_appdata = &uip_buf[UIP_LLH_LEN + (BUF->vhl & 0x0f) * 4 + ((BUF->tcpoffset >> 4) * 4)];
++	uip_len = len;
++	uip_slen = 0;
++	uip_flags = 0;
++
++	if (len > 0) {
++		uip_flags |= UIP_NEWDATA;
++		cur_seq += len;
++		uip_conn->rcv_nxt[0] = cur_seq >> 24;
++		uip_conn->rcv_nxt[1] = cur_seq >> 16;
++		uip_conn->rcv_nxt[2] = cur_seq >> 8;
++		uip_conn->rcv_nxt[3] = cur_seq;
++	}
++
++	if (BUF->flags & TCP_FIN) {
++		uip_flags |= UIP_CLOSE;
++		cur_seq += 1;
++		uip_conn->rcv_nxt[0] = cur_seq >> 24;
++		uip_conn->rcv_nxt[1] = cur_seq >> 16;
++		uip_conn->rcv_nxt[2] = cur_seq >> 8;
++		uip_conn->rcv_nxt[3] = cur_seq;
++		uip_conn->tcpstateflags = UIP_CLOSED;
++	}
++
++	uip_appcall();
++
++	if (uip_slen > 0 || (uip_flags & UIP_NEWDATA) || (BUF->flags & TCP_FIN)) {
++		u32_t snd = ((u32_t)uip_conn->snd_nxt[0] << 24) | ((u32_t)uip_conn->snd_nxt[1] << 16) |
++			    ((u32_t)uip_conn->snd_nxt[2] << 8) | uip_conn->snd_nxt[3];
++		u32_t rcv = ((u32_t)uip_conn->rcv_nxt[0] << 24) | ((u32_t)uip_conn->rcv_nxt[1] << 16) |
++			    ((u32_t)uip_conn->rcv_nxt[2] << 8) | uip_conn->rcv_nxt[3];
++
++		uip_add_ack(snd, rcv);
++		BUF->flags = TCP_ACK;
++		if (uip_slen > 0) {
++			BUF->flags |= TCP_PSH;
++			snd += uip_slen;
++			uip_conn->snd_nxt[0] = snd >> 24;
++			uip_conn->snd_nxt[1] = snd >> 16;
++			uip_conn->snd_nxt[2] = snd >> 8;
++			uip_conn->snd_nxt[3] = snd;
++		}
++		if (uip_flags & UIP_CLOSE) {
++			BUF->flags |= TCP_FIN;
++		}
++		goto send_pkt;
++	}
++
++	uip_len = 0;
++	return;
++
++send_pkt:
++	BUF->vhl = 0x45;
++	BUF->tos = 0;
++	u16_t total = UIP_IPTCPH_LEN + uip_slen;
++	BUF->len[0] = total >> 8;
++	BUF->len[1] = total & 0xff;
++	BUF->ipid[0] = ++ipid >> 8;
++	BUF->ipid[1] = ipid & 0xff;
++	BUF->ipoffset[0] = 0;
++	BUF->ipoffset[1] = 0;
++	BUF->ttl = 64;
++	BUF->proto = UIP_PROTO_TCP;
++	BUF->srcport = uip_conn->lport;
++	BUF->destport = uip_conn->rport;
++	uip_ipaddr_copy(BUF->srcipaddr, BUF->destipaddr);
++	uip_ipaddr_copy(BUF->destipaddr, uip_conn->ripaddr);
++
++	BUF->tcpoffset = (UIP_TCPH_LEN / 4) << 4;
++	BUF->wnd[0] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) >> 8;
++	BUF->wnd[1] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) & 0xff;
++	BUF->urgp[0] = 0;
++	BUF->urgp[1] = 0;
++
++	BUF->ipchksum = 0;
++	BUF->ipchksum = uip_ipchksum();
++	BUF->tcpchksum = 0;
++	uip_len = total;
++	BUF->tcpchksum = uip_tcpchksum();
++
++	uip_arp_out();
++}
++
++void uip_periodic(int conn)
++{
++}
+--- /dev/null
++++ b/net/httpd.c
+@@ -0,0 +1,185 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Copyright (C) 2026 Dante <dante@seckv.com>
++ * Optimized Web Failsafe HTTP Daemon for Banana Pi BPi-R4
++ */
++
++#include <common.h>
++#include <command.h>
++#include <net.h>
++#include <net/uip.h>
++#include <net/uip_arp.h>
++#include <net/httpd.h>
++#include <linux/delay.h>
++
++static int httpd_active = 0;
++static ulong upload_addr = 0x50000000;
++static size_t upload_size = 0;
++static size_t expected_size = 0;
++static int in_upload = 0;
++static int upload_finished = 0;
++
++/* Ultra-compact, single MSS (< 1420 bytes) modern HTML page */
++static const char html_page[] =
++"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>BPi-R4 Failsafe</title>"
++"<style>body{font-family:sans-serif;background:#181818;color:#eee;margin:10% auto;width:300px}"
++"h3{color:#58a6ff}input,button{width:100%;margin:6px 0;padding:8px;box-sizing:border-box}"
++"button{background:#28a745;color:#fff;border:0;border-radius:4px;cursor:pointer}"
++"#p{height:6px;background:#333;display:none}#pb{height:100%;width:0;background:#58a6ff}"
++"#m{font-size:12px;color:#58a6ff}</style></head><body>"
++"<h3>BPi-R4 Failsafe</h3><p style=\"font-size:12px;color:#888\">MT7988A (192.168.1.1)</p>"
++"<input type=\"file\" id=\"f\"><div id=\"p\"><div id=\"pb\"></div></div>"
++"<button id=\"b\" onclick=\"up()\">Flash Firmware</button><div id=\"m\"></div>"
++"<script>function up(){var f=document.getElementById('f').files[0];if(!f)return;"
++"document.getElementById('b').disabled=true;document.getElementById('p').style.display='block';"
++"var x=new XMLHttpRequest();x.open('POST','/upload?size='+f.size,true);"
++"x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100);"
++"document.getElementById('pb').style.width=p+'%';document.getElementById('m').innerText='Uploading: '+p+'%';};"
++"x.onload=function(){document.getElementById('m').innerText='Flashing! Rebooting...';};"
++"x.onerror=function(){document.getElementById('m').innerText='Failed!';document.getElementById('b').disabled=false;};"
++"x.send(f);}</script></body></html>";
++
++static const char resp_200_hdr[] =
++"HTTP/1.0 200 OK\r\n"
++"Content-Type: text/html\r\n"
++"Connection: close\r\n\r\n";
++
++static const char resp_ok_hdr[] =
++"HTTP/1.0 200 OK\r\n"
++"Content-Type: text/plain\r\n"
++"Connection: close\r\n\r\n"
++"Upload complete. Flashing firmware...";
++
++void uip_appcall(void)
++{
++	char *data = (char *)uip_appdata;
++
++	if (uip_connected()) {
++		return;
++	}
++
++	if (uip_newdata()) {
++		if (strncmp(data, "GET / ", 6) == 0 || strncmp(data, "GET /index.html", 15) == 0) {
++			static char buf[1500];
++			int hlen = strlen(resp_200_hdr);
++			int plen = strlen(html_page);
++			if (hlen + plen < sizeof(buf)) {
++				memcpy(buf, resp_200_hdr, hlen);
++				memcpy(buf + hlen, html_page, plen);
++				uip_send(buf, hlen + plen);
++			}
++			uip_close();
++			return;
++		}
++
++		if (strncmp(data, "POST /upload", 12) == 0) {
++			char *sz_str = strstr(data, "size=");
++			expected_size = 0;
++			if (sz_str) {
++				expected_size = simple_strtoul(sz_str + 5, NULL, 10);
++			} else {
++				char *cl = strstr(data, "Content-Length: ");
++				if (cl)
++					expected_size = simple_strtoul(cl + 16, NULL, 10);
++			}
++
++			char *l = env_get("loadaddr");
++			if (l)
++				upload_addr = simple_strtoul(l, NULL, 16);
++
++			printf("\nHTTPD: Starting firmware upload to 0x%08lx (expected %zu bytes)...\n",
++			       upload_addr, expected_size);
++
++			in_upload = 1;
++			upload_size = 0;
++
++			char *body = strstr(data, "\r\n\r\n");
++			if (body) {
++				body += 4;
++				int chunk = uip_datalen() - (body - data);
++				if (chunk > 0) {
++					memcpy((void *)upload_addr, body, chunk);
++					upload_size = chunk;
++				}
++			}
++			return;
++		}
++
++		if (in_upload) {
++			int chunk = uip_datalen();
++			if (upload_size + chunk <= HTTPD_MAX_DATA_SIZE) {
++				memcpy((void *)(upload_addr + upload_size), data, chunk);
++				upload_size += chunk;
++				if ((upload_size % (1024 * 512)) < chunk)
++					printf("#");
++			}
++
++			if (expected_size > 0 && upload_size >= expected_size) {
++				printf("\nHTTPD: Received all %zu bytes.\n", upload_size);
++				uip_send((void *)resp_ok_hdr, strlen(resp_ok_hdr));
++				uip_close();
++				in_upload = 0;
++				upload_finished = 1;
++			}
++			return;
++		}
++
++		uip_send("HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n", 42);
++		uip_close();
++	}
++}
++
++int httpd_is_active(void)
++{
++	return httpd_active;
++}
++
++void httpd_start(void)
++{
++	struct uip_eth_addr eaddr;
++	uip_ipaddr_t ip;
++	uchar *net_mac = net_ethaddr;
++
++	memcpy(eaddr.addr, net_mac, 6);
++
++	char *ip_str = env_get("ipaddr");
++	if (!ip_str)
++		ip_str = "192.168.1.1";
++
++	struct in_addr in;
++	in = string_to_ip(ip_str);
++	u32 nip = ntohl(in.s_addr);
++
++	uip_init();
++	uip_arp_init();
++
++	uip_setethaddr(eaddr);
++	uip_ipaddr(ip, (nip >> 24) & 0xff, (nip >> 16) & 0xff, (nip >> 8) & 0xff, nip & 0xff);
++	uip_sethostaddr(ip);
++
++	uip_listen(80);
++	httpd_active = 1;
++	in_upload = 0;
++	upload_finished = 0;
++
++	printf("HTTPD: Web Failsafe daemon initialized and listening on port 80.\n");
++}
++
++void httpd_poll(void)
++{
++	if (upload_finished) {
++		upload_finished = 0;
++		printf("HTTPD: Verifying and flashing firmware...\n");
++
++		char sz_buf[32];
++		snprintf(sz_buf, sizeof(sz_buf), "0x%zx", upload_size);
++		env_set("filesize", sz_buf);
++
++		int ret = run_command("run web_failsafe_flash", 0);
++		if (ret == 0) {
++			printf("HTTPD: Flash succeeded! Rebooting into new system...\n");
++			mdelay(2000);
++			do_reset(NULL, 0, 0, NULL);
++		} else {
++			printf("HTTPD: Flash failed or rejected! (code %d)\n", ret);
++		}
++	}
++}
++
++void httpd_rx(uchar *pkt, int len)
++{
++	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)pkt;
++	u16_t type = ntohs(eth->type);
++
++	if (len > UIP_BUFSIZE)
++		len = UIP_BUFSIZE;
++
++	memcpy(uip_buf, pkt, len);
++	uip_len = len;
++
++	if (type == UIP_ETHTYPE_ARP) {
++		uip_arp_arpin();
++		if (uip_len > 0) {
++			net_send_packet(uip_buf, uip_len);
++		}
++	} else if (type == UIP_ETHTYPE_IP) {
++		uip_arp_ipin();
++		uip_input();
++		if (uip_len > 0) {
++			net_send_packet(uip_buf, uip_len);
++		}
++	}
++}
++
++void httpd_stop(void)
++{
++	httpd_active = 0;
++}
