@@ -127,13 +127,14 @@
  
  		/*
  		 *	Abort if ctrl-c was pressed.
-@@ -1245,6 +1257,12 @@ void net_process_received_packet(uchar *
+@@ -1245,6 +1257,13 @@ void net_process_received_packet(uchar *
  	if (len < ETHER_HDR_SIZE)
  		return;
  
 +#if defined(CONFIG_CMD_HTTPD)
 +	if (httpd_is_active()) {
-+		httpd_rx(in_packet, len);
++		if (httpd_rx(in_packet, len))
++			return;
 +	}
 +#endif
 +
@@ -155,7 +156,7 @@
 +
 +void httpd_start(void);
 +void httpd_poll(void);
-+void httpd_rx(uchar *pkt, int len);
++int httpd_rx(uchar *pkt, int len);
 +int httpd_is_active(void);
 +void httpd_stop(void);
 +
@@ -164,7 +165,7 @@
 +#endif /* __NET_HTTPD_H__ */
 --- /dev/null
 +++ b/include/net/uip_arp.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,39 @@
 +/* SPDX-License-Identifier: BSD-3-Clause */
 +#ifndef __UIP_ARP_H__
 +#define __UIP_ARP_H__
@@ -175,7 +176,7 @@
 +	struct uip_eth_addr dest;
 +	struct uip_eth_addr src;
 +	u16_t type;
-+};
++} __attribute__((packed));
 +
 +#define UIP_ETHTYPE_ARP 0x0806
 +#define UIP_ETHTYPE_IP  0x0800
@@ -191,7 +192,7 @@
 +	u16_t sipaddr[2];
 +	struct uip_eth_addr dhwaddr;
 +	u16_t dipaddr[2];
-+};
++} __attribute__((packed));
 +
 +#define ARP_REQUEST 1
 +#define ARP_REPLY   2
@@ -202,6 +203,7 @@
 +void uip_arp_ipin(void);
 +void uip_arp_arpin(void);
 +void uip_arp_out(void);
++void uip_set_client_ethaddr(struct uip_eth_addr addr);
 +#endif
 --- /dev/null
 +++ b/include/net/uip.h
@@ -310,7 +312,7 @@
 +	u8_t seqno[4], ackno[4], tcpoffset, flags, wnd[2];
 +	u16_t tcpchksum;
 +	u8_t urgp[2];
-+};
++} __attribute__((packed));
 +
 +#define UIP_PROTO_ICMP  1
 +#define UIP_PROTO_TCP   6
@@ -351,7 +353,7 @@
 +#endif
 --- /dev/null
 +++ b/net/uip_arp.c
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,86 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal ARP implementation for uIP
@@ -364,18 +366,25 @@
 +#include <net/uip_arp.h>
 +
 +static struct uip_eth_addr ethaddr;
-+static uip_ipaddr_t hostaddr;
++static struct uip_eth_addr client_ethaddr;
++uip_ipaddr_t hostaddr;
 +
 +#define BUF ((struct uip_arp_hdr *)&uip_buf[0])
 +#define IPBUF ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
 +
 +void uip_arp_init(void)
 +{
++	memset(&client_ethaddr, 0, sizeof(client_ethaddr));
 +}
 +
 +void uip_setethaddr(struct uip_eth_addr addr)
 +{
 +	ethaddr = addr;
++}
++
++void uip_set_client_ethaddr(struct uip_eth_addr addr)
++{
++	client_ethaddr = addr;
 +}
 +
 +void uip_sethostaddr(uip_ipaddr_t addr)
@@ -395,6 +404,7 @@
 +	case htons(ARP_REQUEST):
 +		if (uip_ipaddr_cmp(BUF->dipaddr, hostaddr)) {
 +			BUF->opcode = htons(ARP_REPLY);
++			memcpy(client_ethaddr.addr, BUF->shwaddr.addr, 6);
 +			memcpy(BUF->dhwaddr.addr, BUF->shwaddr.addr, 6);
 +			memcpy(BUF->shwaddr.addr, ethaddr.addr, 6);
 +			memcpy(BUF->ethhdr.src.addr, ethaddr.addr, 6);
@@ -421,20 +431,18 @@
 +void uip_arp_out(void)
 +{
 +	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)&uip_buf[0];
-+	struct uip_arp_hdr *arp = (struct uip_arp_hdr *)&uip_buf[0];
 +
 +	if (eth->type == htons(UIP_ETHTYPE_ARP))
 +		return;
 +
 +	memcpy(eth->src.addr, ethaddr.addr, 6);
-+	/* Reply to the client that connected to us */
-+	memcpy(eth->dest.addr, arp->dhwaddr.addr, 6);
++	memcpy(eth->dest.addr, client_ethaddr.addr, 6);
 +	eth->type = htons(UIP_ETHTYPE_IP);
 +	uip_len += UIP_LLH_LEN;
 +}
 --- /dev/null
 +++ b/net/uip.c
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,278 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP TCP State Machine Implementation
@@ -442,6 +450,7 @@
 +
 +#include <linux/types.h>
 +#include <linux/string.h>
++#include <stdio.h>
 +#include <asm/byteorder.h>
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
@@ -453,6 +462,8 @@
 +u8_t uip_flags;
 +struct uip_tcp_conn *uip_conn;
 +struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++
++extern uip_ipaddr_t hostaddr;
 +
 +static u16_t uip_listenport;
 +static u16_t ipid;
@@ -549,9 +560,15 @@
 +		}
 +	}
 +
++	if (uip_conn && (BUF->flags & TCP_SYN)) {
++		uip_conn->tcpstateflags = UIP_CLOSED;
++		uip_conn = NULL;
++	}
++
 +	/* New incoming connection */
 +	if (!uip_conn) {
-+		if (BUF->flags != TCP_SYN || BUF->destport != htons(uip_listenport)) {
++		if ((BUF->flags & TCP_SYN) == 0 || (BUF->flags & TCP_ACK) != 0 ||
++		    BUF->destport != htons(uip_listenport)) {
 +			uip_len = 0;
 +			return;
 +		}
@@ -649,14 +666,16 @@
 +		if (uip_slen > 0) {
 +			BUF->flags |= TCP_PSH;
 +			snd += uip_slen;
-+			uip_conn->snd_nxt[0] = snd >> 24;
-+			uip_conn->snd_nxt[1] = snd >> 16;
-+			uip_conn->snd_nxt[2] = snd >> 8;
-+			uip_conn->snd_nxt[3] = snd;
 +		}
 +		if (uip_flags & UIP_CLOSE) {
 +			BUF->flags |= TCP_FIN;
++			snd += 1;
++			uip_conn->tcpstateflags = UIP_CLOSED;
 +		}
++		uip_conn->snd_nxt[0] = snd >> 24;
++		uip_conn->snd_nxt[1] = snd >> 16;
++		uip_conn->snd_nxt[2] = snd >> 8;
++		uip_conn->snd_nxt[3] = snd;
 +		goto send_pkt;
 +	}
 +
@@ -664,6 +683,10 @@
 +	return;
 +
 +send_pkt:
++	if (uip_slen > 0 && uip_appdata && uip_appdata != &uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN]) {
++		memcpy(&uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN], uip_appdata, uip_slen);
++	}
++
 +	BUF->vhl = 0x45;
 +	BUF->tos = 0;
 +	u16_t total = UIP_IPTCPH_LEN + uip_slen;
@@ -677,7 +700,7 @@
 +	BUF->proto = UIP_PROTO_TCP;
 +	BUF->srcport = uip_conn->lport;
 +	BUF->destport = uip_conn->rport;
-+	uip_ipaddr_copy(BUF->srcipaddr, BUF->destipaddr);
++	uip_ipaddr_copy(BUF->srcipaddr, hostaddr);
 +	uip_ipaddr_copy(BUF->destipaddr, uip_conn->ripaddr);
 +
 +	BUF->tcpoffset = (UIP_TCPH_LEN / 4) << 4;
@@ -700,7 +723,7 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,240 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -767,7 +790,14 @@
 +	}
 +
 +	if (uip_newdata()) {
-+		if (strncmp(data, "GET / ", 6) == 0 || strncmp(data, "GET /index.html", 15) == 0) {
++		if (strncmp(data, "GET / ", 6) == 0 || strncmp(data, "GET /index.html", 15) == 0 ||
++		    strncmp(data, "GET /favicon.ico", 16) == 0) {
++			if (strncmp(data, "GET /favicon.ico", 16) == 0) {
++				uip_send("HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n", 42);
++				uip_close();
++				return;
++			}
++			printf("HTTPD: Delivering recovery web page...\n");
 +			static char buf[1500];
 +			int hlen = strlen(resp_200_hdr);
 +			int plen = strlen(html_page);
@@ -894,7 +924,7 @@
 +	}
 +}
 +
-+void httpd_rx(uchar *pkt, int len)
++int httpd_rx(uchar *pkt, int len)
 +{
 +	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)pkt;
 +	u16_t type = ntohs(eth->type);
@@ -902,21 +932,32 @@
 +	if (len > UIP_BUFSIZE)
 +		len = UIP_BUFSIZE;
 +
-+	memcpy(uip_buf, pkt, len);
-+	uip_len = len;
++	/* Save client MAC address so replies reach the client */
++	uip_set_client_ethaddr(eth->src);
 +
 +	if (type == UIP_ETHTYPE_ARP) {
++		memcpy(uip_buf, pkt, len);
++		uip_len = len;
 +		uip_arp_arpin();
 +		if (uip_len > 0) {
 +			net_send_packet(uip_buf, uip_len);
++			return 1;
 +		}
++		return 0;
 +	} else if (type == UIP_ETHTYPE_IP) {
-+		uip_arp_ipin();
-+		uip_input();
-+		if (uip_len > 0) {
-+			net_send_packet(uip_buf, uip_len);
++		struct uip_tcpip_hdr *ip = (struct uip_tcpip_hdr *)(pkt + UIP_LLH_LEN);
++		if (ip->proto == UIP_PROTO_TCP) {
++			memcpy(uip_buf, pkt, len);
++			uip_len = len;
++			uip_arp_ipin();
++			uip_input();
++			if (uip_len > 0) {
++				net_send_packet(uip_buf, uip_len);
++			}
++			return 1;
 +		}
 +	}
++	return 0;
 +}
 +
 +void httpd_stop(void)
