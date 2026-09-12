@@ -26,16 +26,17 @@
  obj-$(CONFIG_CMD_INI) += ini.o
 --- /dev/null
 +++ b/cmd/httpd.c
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,43 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
 + * Web Failsafe Command for BPi-R4 and MediaTek Platforms
 + */
 +
-+#include <common.h>
 +#include <command.h>
++#include <env.h>
 +#include <net.h>
++#include <stdio.h>
 +#include <net/httpd.h>
 +
 +static int do_httpd(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
@@ -120,7 +121,7 @@
  		tcp_streams_poll();
  #endif
 +#if defined(CONFIG_CMD_HTTPD)
-+		if (net_state == NETLOOP_LOOP && protocol == HTTPD)
++		if (net_state == NETLOOP_CONTINUE && protocol == HTTPD)
 +			httpd_poll();
 +#endif
  
@@ -141,7 +142,7 @@
  		(*push_packet)(in_packet, len);
 --- /dev/null
 +++ b/include/net/httpd.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,19 @@
 +/* SPDX-License-Identifier: GPL-2.0+ */
 +/*
 + * Web Failsafe HTTP Daemon Header
@@ -150,8 +151,7 @@
 +#ifndef __NET_HTTPD_H__
 +#define __NET_HTTPD_H__
 +
-+#include <common.h>
-+#include <net.h>
++#include <linux/types.h>
 +
 +void httpd_start(void);
 +void httpd_poll(void);
@@ -180,7 +180,7 @@
 +#define UIP_ETHTYPE_ARP 0x0806
 +#define UIP_ETHTYPE_IP  0x0800
 +
-+struct arp_hdr {
++struct uip_arp_hdr {
 +	struct uip_eth_hdr ethhdr;
 +	u16_t hwtype;
 +	u16_t protocol;
@@ -205,7 +205,7 @@
 +#endif
 --- /dev/null
 +++ b/include/net/uip.h
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,143 @@
 +/* SPDX-License-Identifier: BSD-3-Clause */
 +/*
 + * Minimal uIP TCP/IP stack definitions for U-Boot HTTPD
@@ -215,6 +215,7 @@
 +#define __UIP_H__
 +
 +#include <linux/types.h>
++#include <asm/byteorder.h>
 +
 +typedef u8  u8_t;
 +typedef u16 u16_t;
@@ -350,20 +351,22 @@
 +#endif
 --- /dev/null
 +++ b/net/uip_arp.c
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,80 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal ARP implementation for uIP
 + */
 +
-+#include <common.h>
++#include <linux/types.h>
++#include <linux/string.h>
++#include <asm/byteorder.h>
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
 +
 +static struct uip_eth_addr ethaddr;
 +static uip_ipaddr_t hostaddr;
 +
-+#define BUF ((struct arp_hdr *)&uip_buf[0])
++#define BUF ((struct uip_arp_hdr *)&uip_buf[0])
 +#define IPBUF ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
 +
 +void uip_arp_init(void)
@@ -382,7 +385,7 @@
 +
 +void uip_arp_arpin(void)
 +{
-+	if (uip_len < sizeof(struct arp_hdr)) {
++	if (uip_len < sizeof(struct uip_arp_hdr)) {
 +		uip_len = 0;
 +		return;
 +	}
@@ -403,7 +406,7 @@
 +			BUF->sipaddr[1] = hostaddr[1];
 +
 +			BUF->ethhdr.type = htons(UIP_ETHTYPE_ARP);
-+			uip_len = sizeof(struct arp_hdr);
++			uip_len = sizeof(struct uip_arp_hdr);
 +		}
 +		break;
 +	default:
@@ -418,7 +421,7 @@
 +void uip_arp_out(void)
 +{
 +	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)&uip_buf[0];
-+	struct arp_hdr *arp = (struct arp_hdr *)&uip_buf[0];
++	struct uip_arp_hdr *arp = (struct uip_arp_hdr *)&uip_buf[0];
 +
 +	if (eth->type == htons(UIP_ETHTYPE_ARP))
 +		return;
@@ -431,13 +434,15 @@
 +}
 --- /dev/null
 +++ b/net/uip.c
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,263 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP TCP State Machine Implementation
 + */
 +
-+#include <common.h>
++#include <linux/types.h>
++#include <linux/string.h>
++#include <asm/byteorder.h>
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
 +
@@ -475,7 +480,6 @@
 +
 +u16_t uip_tcpchksum(void)
 +{
-+	u16_t hlen = 40;
 +	u32_t sum = 0;
 +	u16_t tlen = uip_len - 20;
 +
@@ -592,8 +596,6 @@
 +	/* Established state */
 +	u32_t cur_seq = ((u32_t)BUF->seqno[0] << 24) | ((u32_t)BUF->seqno[1] << 16) |
 +			((u32_t)BUF->seqno[2] << 8) | BUF->seqno[3];
-+	u32_t cur_ack = ((u32_t)BUF->ackno[0] << 24) | ((u32_t)BUF->ackno[1] << 16) |
-+			((u32_t)BUF->ackno[2] << 8) | BUF->ackno[3];
 +
 +	if (BUF->flags & TCP_RST) {
 +		uip_conn->tcpstateflags = UIP_CLOSED;
@@ -698,20 +700,25 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,222 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
 + * Optimized Web Failsafe HTTP Daemon for Banana Pi BPi-R4
 + */
 +
-+#include <common.h>
 +#include <command.h>
++#include <env.h>
 +#include <net.h>
++#include <stdio.h>
++#include <vsprintf.h>
++#include <linux/types.h>
++#include <linux/string.h>
++#include <linux/delay.h>
++#include <asm/byteorder.h>
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
 +#include <net/httpd.h>
-+#include <linux/delay.h>
 +
 +static int httpd_active = 0;
 +static ulong upload_addr = 0x50000000;
