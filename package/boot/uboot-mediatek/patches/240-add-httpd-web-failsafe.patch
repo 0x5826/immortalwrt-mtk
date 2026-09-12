@@ -723,7 +723,7 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,252 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -753,21 +753,26 @@
 +/* Ultra-compact, single MSS (< 1420 bytes) modern HTML page */
 +static const char html_page[] =
 +"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>BPi-R4 Failsafe</title>"
-+"<style>body{font-family:sans-serif;background:#181818;color:#eee;margin:10% auto;width:300px}"
-+"h3{color:#58a6ff}input,button{width:100%;margin:6px 0;padding:8px;box-sizing:border-box}"
++"<style>body{font-family:sans-serif;background:#181818;color:#eee;margin:10% auto;width:320px}"
++"h3{color:#58a6ff;margin-bottom:4px}p{font-size:12px;color:#888;margin-top:0}"
++"input,button{width:100%;margin:6px 0;padding:8px;box-sizing:border-box}"
 +"button{background:#28a745;color:#fff;border:0;border-radius:4px;cursor:pointer}"
-+"#p{height:6px;background:#333;display:none}#pb{height:100%;width:0;background:#58a6ff}"
-+"#m{font-size:12px;color:#58a6ff}</style></head><body>"
-+"<h3>BPi-R4 Failsafe</h3><p style=\"font-size:12px;color:#888\">MT7988A (192.168.1.1)</p>"
++"button:disabled{background:#555;cursor:not-allowed}"
++"#p{height:6px;background:#333;display:none;margin:8px 0;border-radius:3px;overflow:hidden}"
++"#pb{height:100%;width:0;background:#58a6ff;transition:width .1s}"
++"#m{font-size:13px;color:#58a6ff;margin-top:8px;text-align:center}</style></head><body>"
++"<h3>BPi-R4 Failsafe</h3><p>MT7988A Recovery (192.168.1.1)</p>"
 +"<input type=\"file\" id=\"f\"><div id=\"p\"><div id=\"pb\"></div></div>"
 +"<button id=\"b\" onclick=\"up()\">Flash Firmware</button><div id=\"m\"></div>"
 +"<script>function up(){var f=document.getElementById('f').files[0];if(!f)return;"
 +"document.getElementById('b').disabled=true;document.getElementById('p').style.display='block';"
-+"var x=new XMLHttpRequest();x.open('POST','/upload?size='+f.size,true);"
++"var ok=false;var x=new XMLHttpRequest();x.open('POST','/upload?size='+f.size,true);"
 +"x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100);"
-+"document.getElementById('pb').style.width=p+'%';document.getElementById('m').innerText='Uploading: '+p+'%';};"
-+"x.onload=function(){document.getElementById('m').innerText='Flashing! Rebooting...';};"
-+"x.onerror=function(){document.getElementById('m').innerText='Failed!';document.getElementById('b').disabled=false;};"
++"document.getElementById('pb').style.width=p+'%';"
++"if(p>=100){ok=true;document.getElementById('m').innerText='Flashing! Rebooting in ~30s...';}"
++"else{document.getElementById('m').innerText='Uploading: '+p+'%';}};"
++"x.onload=function(){ok=true;document.getElementById('m').innerText='Flashing! Rebooting in ~30s...';};"
++"x.onerror=function(){if(!ok){document.getElementById('m').innerText='Upload Failed!';document.getElementById('b').disabled=false;}};"
 +"x.send(f);}</script></body></html>";
 +
 +static const char resp_200_hdr[] =
@@ -907,6 +912,13 @@
 +{
 +	if (upload_finished) {
 +		upload_finished = 0;
++
++		/* Allow brief time for the HTTP response packet to clear TX FIFO and PC to receive */
++		for (int i = 0; i < 100; i++) {
++			eth_rx();
++			mdelay(1);
++		}
++
 +		printf("HTTPD: Verifying and flashing firmware...\n");
 +
 +		char sz_buf[32];
