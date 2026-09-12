@@ -1,6 +1,6 @@
 --- a/cmd/Kconfig
 +++ b/cmd/Kconfig
-@@ -1949,6 +1949,13 @@ config CMD_WGET
+@@ -2134,6 +2134,13 @@ config CMD_WGET
  	  Download a image via HTTP or HTTPS and store it to memory
  	  after a successful download.
  
@@ -16,17 +16,17 @@
  	help
 --- a/cmd/Makefile
 +++ b/cmd/Makefile
-@@ -107,6 +107,7 @@ obj-$(CONFIG_CMD_GPIO) += gpio.o
- obj-$(CONFIG_CMD_HVC) += smccc.o
+@@ -98,6 +98,7 @@ obj-$(CONFIG_CMD_HVC) += smccc.o
  obj-$(CONFIG_CMD_I2C) += i2c.o
+ obj-$(CONFIG_CMD_I3C) += i3c.o
  obj-$(CONFIG_CMD_IOTRACE) += iotrace.o
 +obj-$(CONFIG_CMD_HTTPD) += httpd.o
  obj-$(CONFIG_CMD_HASH) += hash.o
- obj-$(CONFIG_CMD_IDE) += ide.o
- obj-$(CONFIG_CMD_IMX8) += imx8.o
+ obj-$(CONFIG_CMD_IDE) += ide.o disk.o
+ obj-$(CONFIG_CMD_INI) += ini.o
 --- /dev/null
 +++ b/cmd/httpd.c
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,42 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -69,38 +69,41 @@
 +	"Start Web Failsafe HTTP recovery server",
 +	"\n    - Starts mini HTTP server on port 80 to flash firmware via web browser\n"
 +);
-+
---- a/include/net.h
-+++ b/include/net.h
-@@ -539,6 +539,7 @@ enum proto_t {
- 	FASTBOOT_UDP,
- 	FASTBOOT_TCP,
- 	WGET,
-+	HTTPD,
+--- a/include/net-legacy.h
++++ b/include/net-legacy.h
+@@ -308,6 +308,9 @@ enum proto_t {
+ 	BOOTP, RARP, ARP, TFTPGET, DHCP, DHCP6, PING, PING6, DNS, NFS, CDP,
+ 	NETCONS, SNTP, TFTPSRV, TFTPPUT, LINKLOCAL, FASTBOOT_UDP, FASTBOOT_TCP,
+ 	WOL, UDP, NCSI, WGET, RS
++#if defined(CONFIG_CMD_HTTPD)
++	, HTTPD
++#endif
  };
  
- extern char	net_boot_file_name[1024];/* Boot File name */
+ /* Indicates whether the file name was specified on the command line */
 --- a/net/Makefile
 +++ b/net/Makefile
-@@ -37,6 +37,7 @@ obj-$(CONFIG_CMD_WGET) += wget.o
- obj-$(CONFIG_CMD_WGET) += tcp.o
+@@ -25,6 +25,7 @@ obj-$(CONFIG_CMD_WOL)  += wol.o
+ obj-$(CONFIG_PROT_UDP) += udp.o
  obj-$(CONFIG_PROT_TCP) += tcp.o
- obj-$(CONFIG_CMD_MDIO) += mdio.o
+ obj-$(CONFIG_WGET) += wget.o
 +obj-$(CONFIG_CMD_HTTPD) += httpd.o uip.o uip_arp.o
  
  # Disable this warning as it is triggered by:
- # sprintf(cmd, "setenv emerg %lX", ncip.s_addr);
+ # sprintf(buf, index ? "foo%d" : "foo", index)
 --- a/net/net.c
 +++ b/net/net.c
-@@ -107,6 +107,7 @@
- #include <net/sntp.h>
- #include <net/tftp.h>
- #include <net/tcp.h>
+@@ -115,6 +115,9 @@
+ #include <net/udp.h>
+ #include <net/wget.h>
+ #include <test/test.h>
++#if defined(CONFIG_CMD_HTTPD)
 +#include <net/httpd.h>
- #if defined(CONFIG_CMD_WOL)
- #include <net/wol.h>
- #endif
-@@ -485,6 +486,11 @@ restart:
++#endif
+ #include "arp.h"
+ #include "bootp.h"
+ #include "cdp.h"
+@@ -578,6 +581,11 @@ restart:
  		case WGET:
  			wget_start();
  			break;
@@ -110,36 +113,35 @@
 +			httpd_start();
 +			break;
  #endif
- 		default:
- 			break;
-@@ -628,6 +634,11 @@ restart:
- 		}
- 
- 		eth_rx();
-+
+ #if defined(CONFIG_CMD_CDP)
+ 		case CDP:
+@@ -663,6 +671,10 @@ restart:
+ #if defined(CONFIG_PROT_TCP)
+ 		tcp_streams_poll();
+ #endif
 +#if defined(CONFIG_CMD_HTTPD)
 +		if (net_state == NETLOOP_LOOP && protocol == HTTPD)
 +			httpd_poll();
 +#endif
  
  		/*
- 		 *	Check for a timeout, and run the timeout handler
-@@ -1245,6 +1256,12 @@ void net_process_received_packet(uchar *
- 		net_set_state(NETLOOP_FAIL);
+ 		 *	Abort if ctrl-c was pressed.
+@@ -1245,6 +1257,12 @@ void net_process_received_packet(uchar *
+ 	if (len < ETHER_HDR_SIZE)
  		return;
- 	}
-+
+ 
 +#if defined(CONFIG_CMD_HTTPD)
 +	if (httpd_is_active()) {
 +		httpd_rx(in_packet, len);
 +	}
 +#endif
- 
- 	eth_hdr = (struct ethernet_hdr *)in_packet;
- 	eth_proto = ntohs(eth_hdr->et_protlen);
++
+ #if defined(CONFIG_API) || defined(CONFIG_EFI_LOADER)
+ 	if (push_packet) {
+ 		(*push_packet)(in_packet, len);
 --- /dev/null
 +++ b/include/net/httpd.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,20 @@
 +/* SPDX-License-Identifier: GPL-2.0+ */
 +/*
 + * Web Failsafe HTTP Daemon Header
@@ -160,7 +162,6 @@
 +#define HTTPD_MAX_DATA_SIZE	0x8000000 /* 128MB max upload buffer */
 +
 +#endif /* __NET_HTTPD_H__ */
-+
 --- /dev/null
 +++ b/include/net/uip_arp.h
 @@ -0,0 +1,38 @@
