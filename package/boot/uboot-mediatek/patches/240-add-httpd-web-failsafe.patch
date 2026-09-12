@@ -442,7 +442,7 @@
 +}
 --- /dev/null
 +++ b/net/uip.c
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,282 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP TCP State Machine Implementation
@@ -634,6 +634,10 @@
 +	uip_slen = 0;
 +	uip_flags = 0;
 +
++	if (BUF->flags & TCP_ACK) {
++		uip_flags |= UIP_ACKDATA;
++	}
++
 +	if (len > 0) {
 +		uip_flags |= UIP_NEWDATA;
 +		cur_seq += len;
@@ -723,11 +727,11 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,403 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
-+ * Optimized Web Failsafe HTTP Daemon for Banana Pi BPi-R4
++ * Multi-Mode Web Failsafe HTTP Recovery Daemon for MediaTek Platforms
 + */
 +
 +#include <command.h>
@@ -750,30 +754,58 @@
 +static int in_upload = 0;
 +static int upload_finished = 0;
 +
-+/* Ultra-compact, single MSS (< 1420 bytes) modern HTML page */
++enum {
++	FW_TYPE_FIRMWARE = 0,
++	FW_TYPE_FIP,
++	FW_TYPE_INITRAMFS,
++	FW_TYPE_GPT,
++	FW_TYPE_BL2,
++};
++
++static int upload_mode = FW_TYPE_FIRMWARE;
++
++static const char *tx_ptr = NULL;
++static int tx_left = 0;
++
++/* Beautiful hanwckf-style 5-in-1 Web Failsafe Dashboard */
 +static const char html_page[] =
-+"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>BPi-R4 Failsafe</title>"
-+"<style>body{font-family:sans-serif;background:#181818;color:#eee;margin:10% auto;width:320px}"
-+"h3{color:#58a6ff;margin-bottom:4px}p{font-size:12px;color:#888;margin-top:0}"
++"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>BPi-R4 Recovery</title>"
++"<style>body{font:12px Arial,sans-serif;background:#ededed;margin:8% auto;width:420px}"
++"#m{background:#fff;padding:24px;border-radius:8px;box-shadow:0 0 12px #ccc}"
++"h2{font:bold 22px Tahoma;color:#2450ad;margin:0 0 12px;text-align:center}"
++".tb{display:flex;border-bottom:2px solid #2450ad;margin-bottom:12px}"
++".t{flex:1;text-align:center;padding:6px 0;cursor:pointer;background:#e2e6ea;font-weight:bold;font-size:11px;color:#495057}"
++".t.a{background:#2450ad;color:#fff}"
++"#d{color:#555;font-size:12px;min-height:30px;text-align:center;margin:8px 0;line-height:16px}"
 +"input,button{width:100%;margin:6px 0;padding:8px;box-sizing:border-box}"
-+"button{background:#28a745;color:#fff;border:0;border-radius:4px;cursor:pointer}"
-+"button:disabled{background:#555;cursor:not-allowed}"
-+"#p{height:6px;background:#333;display:none;margin:8px 0;border-radius:3px;overflow:hidden}"
-+"#pb{height:100%;width:0;background:#58a6ff;transition:width .1s}"
-+"#m{font-size:13px;color:#58a6ff;margin-top:8px;text-align:center}</style></head><body>"
-+"<h3>BPi-R4 Failsafe</h3><p>MT7988A Recovery (192.168.1.1)</p>"
++"button{background:#2dabf9;color:#fff;border:0;border-radius:4px;cursor:pointer;font-weight:bold;font-size:14px}"
++"button:hover{background:#0688fa}button:disabled{background:#aaa;cursor:not-allowed}"
++"#p{height:16px;background:#f0f0f0;border-radius:8px;overflow:hidden;display:none;margin:8px 0}"
++"#pb{height:100%;width:0;background:#2486ff;color:#fff;font-size:11px;text-align:right;line-height:16px;padding-right:5px}"
++"#w{background:#fefdce;border:1px solid #ffc643;padding:8px 12px;border-radius:4px;font-size:11px;color:#856404;margin-top:10px}"
++"#w.e{background:#f8d7da;border-color:#f5c6cb;color:#721c24}"
++"#msg{text-align:center;font-weight:bold;color:#2450ad;margin:6px 0}</style></head><body><div id=\"m\">"
++"<h2>BPi-R4 RECOVERY</h2>"
++"<div class=\"tb\">"
++"<div class=\"t a\" onclick=\"s(0)\">Firmware</div>"
++"<div class=\"t\" onclick=\"s(1)\">U-Boot</div>"
++"<div class=\"t\" onclick=\"s(2)\">RAM Boot</div>"
++"<div class=\"t\" onclick=\"s(3)\">GPT</div>"
++"<div class=\"t\" onclick=\"s(4)\">BL2</div>"
++"</div>"
++"<div id=\"d\">Flash OpenWrt system (.itb) to Production partition.</div>"
 +"<input type=\"file\" id=\"f\"><div id=\"p\"><div id=\"pb\"></div></div>"
-+"<button id=\"b\" onclick=\"up()\">Flash Firmware</button><div id=\"m\"></div>"
-+"<script>function up(){var f=document.getElementById('f').files[0];if(!f)return;"
-+"document.getElementById('b').disabled=true;document.getElementById('p').style.display='block';"
-+"var ok=false;var x=new XMLHttpRequest();x.open('POST','/upload?size='+f.size,true);"
-+"x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100);"
-+"document.getElementById('pb').style.width=p+'%';"
-+"if(p>=100){ok=true;document.getElementById('m').innerText='Flashing! Rebooting in ~30s...';}"
-+"else{document.getElementById('m').innerText='Uploading: '+p+'%';}};"
-+"x.onload=function(){ok=true;document.getElementById('m').innerText='Flashing! Rebooting in ~30s...';};"
-+"x.onerror=function(){if(!ok){document.getElementById('m').innerText='Upload Failed!';document.getElementById('b').disabled=false;}};"
-+"x.send(f);}</script></body></html>";
++"<button id=\"b\" onclick=\"up()\">Upload & Flash</button><div id=\"msg\"></div>"
++"<div id=\"w\"><strong>WARNING:</strong> Do not power off. Device will reboot after flash.</div>"
++"</div>"
++"<script>"
++"var T=['firmware','fip','initramfs','gpt','bl2'];"
++"var D=['Flash OpenWrt system (.itb) to Production partition.','Flash BL31 + U-Boot FIP image (.fip).','Test boot Linux in RAM without flashing disk.','Flash GPT partition table image (17KB).','DANGER: Flash ATF BL2 preloader image.'];"
++"var W=['Do not power off. Device will reboot after flash.','Warning: Invalid FIP may corrupt bootloader.','Notice: Boots in memory only. Disk is untouched.','Warning: Overwrites partition layout!','DANGER: Flashing wrong BL2 will permanently brick board!'];"
++"var c=0;"
++"function s(i){c=i;document.querySelectorAll('.t').forEach(function(e,k){e.className=k===i?'t a':'t';});document.getElementById('d').innerText=D[i];var w=document.getElementById('w');w.className=i===4?'w e':'w';w.innerHTML='<strong>'+(i===4?'DANGER:':'WARNING:')+'</strong> '+W[i];document.getElementById('b').innerText=i===2?'Boot from RAM':'Upload & Flash';}"
++"function up(){var f=document.getElementById('f').files[0];if(!f)return;document.getElementById('b').disabled=true;document.getElementById('p').style.display='block';var ok=false,x=new XMLHttpRequest();x.open('POST','/upload?type='+T[c]+'&size='+f.size,true);x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100),el=document.getElementById('pb');el.style.width=p+'%';el.innerText=p+'%';if(p>=100){ok=true;document.getElementById('msg').innerText=c===2?'Booting RAM kernel...':'Flashing! Rebooting in ~30s...';}else{document.getElementById('msg').innerText='Uploading: '+p+'%';}};x.onload=function(){ok=true;document.getElementById('msg').innerText=c===2?'Kernel loaded! Booting...':'Flashing! Rebooting in ~30s...';};x.onerror=function(){if(!ok){document.getElementById('msg').innerText='Upload Failed!';document.getElementById('b').disabled=false;}};x.send(f);}"
++"</script></body></html>";
 +
 +static const char resp_200_hdr[] =
 +"HTTP/1.0 200 OK\r\n"
@@ -784,14 +816,37 @@
 +"HTTP/1.0 200 OK\r\n"
 +"Content-Type: text/plain\r\n"
 +"Connection: close\r\n\r\n"
-+"Upload complete. Flashing firmware...";
++"Upload complete. Processing request...";
++
++static void send_next_chunk(void)
++{
++	if (tx_left > 0) {
++		int chunk = tx_left > 1400 ? 1400 : tx_left;
++		uip_send((void *)tx_ptr, chunk);
++		tx_ptr += chunk;
++		tx_left -= chunk;
++		if (tx_left == 0)
++			uip_close();
++	} else {
++		uip_close();
++	}
++}
 +
 +void uip_appcall(void)
 +{
 +	char *data = (char *)uip_appdata;
 +
 +	if (uip_connected()) {
++		tx_ptr = NULL;
++		tx_left = 0;
 +		return;
++	}
++
++	if (uip_acked()) {
++		if (tx_left > 0) {
++			send_next_chunk();
++			return;
++		}
 +	}
 +
 +	if (uip_newdata()) {
@@ -803,19 +858,32 @@
 +				return;
 +			}
 +			printf("HTTPD: Delivering recovery web page...\n");
-+			static char buf[1500];
++			static char full_page[4096];
 +			int hlen = strlen(resp_200_hdr);
 +			int plen = strlen(html_page);
-+			if (hlen + plen < sizeof(buf)) {
-+				memcpy(buf, resp_200_hdr, hlen);
-+				memcpy(buf + hlen, html_page, plen);
-+				uip_send(buf, hlen + plen);
++			if (hlen + plen < sizeof(full_page)) {
++				memcpy(full_page, resp_200_hdr, hlen);
++				memcpy(full_page + hlen, html_page, plen);
++				tx_ptr = full_page;
++				tx_left = hlen + plen;
++				send_next_chunk();
++			} else {
++				uip_close();
 +			}
-+			uip_close();
 +			return;
 +		}
 +
 +		if (strncmp(data, "POST /upload", 12) == 0) {
++			upload_mode = FW_TYPE_FIRMWARE;
++			if (strstr(data, "type=fip"))
++				upload_mode = FW_TYPE_FIP;
++			else if (strstr(data, "type=initramfs"))
++				upload_mode = FW_TYPE_INITRAMFS;
++			else if (strstr(data, "type=gpt"))
++				upload_mode = FW_TYPE_GPT;
++			else if (strstr(data, "type=bl2"))
++				upload_mode = FW_TYPE_BL2;
++
 +			char *sz_str = strstr(data, "size=");
 +			expected_size = 0;
 +			if (sz_str) {
@@ -830,8 +898,8 @@
 +			if (l)
 +				upload_addr = simple_strtoul(l, NULL, 16);
 +
-+			printf("\nHTTPD: Starting firmware upload to 0x%08lx (expected %zu bytes)...\n",
-+			       upload_addr, expected_size);
++			printf("\nHTTPD: Starting upload (mode %d) to 0x%08lx (expected %zu bytes)...\n",
++			       upload_mode, upload_addr, expected_size);
 +
 +			in_upload = 1;
 +			upload_size = 0;
@@ -858,7 +926,7 @@
 +			}
 +
 +			if (expected_size > 0 && upload_size >= expected_size) {
-+				printf("\nHTTPD: Received all %zu bytes.\n", upload_size);
++				printf("\nHTTPD: Received all %zu bytes (mode %d).\n", upload_size, upload_mode);
 +				uip_send((void *)resp_ok_hdr, strlen(resp_ok_hdr));
 +				uip_close();
 +				in_upload = 0;
@@ -919,19 +987,106 @@
 +			mdelay(1);
 +		}
 +
-+		printf("HTTPD: Verifying and flashing firmware...\n");
-+
 +		char sz_buf[32];
 +		snprintf(sz_buf, sizeof(sz_buf), "0x%zx", upload_size);
 +		env_set("filesize", sz_buf);
 +
-+		int ret = run_command("run web_failsafe_flash", 0);
++		int valid = 0;
++		const char *cmd = NULL;
++		int do_reboot = 1;
++
++		switch (upload_mode) {
++		case FW_TYPE_FIRMWARE:
++			printf("HTTPD: Validating OpenWrt FIT Firmware image...\n");
++			if (upload_size >= 4 && *(u32 *)upload_addr == cpu_to_be32(0xd00dfeed)) {
++				valid = 1;
++				cmd = "run web_failsafe_flash";
++			} else {
++				printf("HTTPD: ERROR! Invalid FIT image (Magic mismatch)!\n");
++			}
++			break;
++
++		case FW_TYPE_FIP:
++			printf("HTTPD: Validating BL31 + U-Boot FIP image...\n");
++			if (upload_size >= 0x20000 && upload_size <= 0x400000) {
++				u32 magic = *(u32 *)upload_addr;
++				if (magic == 0xaa640001 || magic == 0x010064aa) {
++					valid = 1;
++					cmd = "run web_failsafe_fip";
++				} else {
++					printf("HTTPD: ERROR! Invalid FIP TOC Header Magic (0x%08x)!\n", magic);
++				}
++			} else {
++				printf("HTTPD: ERROR! FIP image size out of range (%zu bytes)!\n", upload_size);
++			}
++			break;
++
++		case FW_TYPE_INITRAMFS:
++			printf("HTTPD: Validating Initramfs FIT image for RAM boot...\n");
++			if (upload_size >= 4 && *(u32 *)upload_addr == cpu_to_be32(0xd00dfeed)) {
++				valid = 1;
++				cmd = "run web_failsafe_ramboot";
++				do_reboot = 0; /* Direct boot into kernel */
++			} else {
++				printf("HTTPD: ERROR! Invalid FIT image for RAM boot!\n");
++			}
++			break;
++
++		case FW_TYPE_GPT:
++			printf("HTTPD: Validating GPT Partition Table image...\n");
++			if (upload_size >= 0x4000 && upload_size <= 0x100000) {
++				if (memcmp((void *)(upload_addr + 512), "EFI PART", 8) == 0) {
++					valid = 1;
++					cmd = "run web_failsafe_gpt";
++				} else {
++					printf("HTTPD: ERROR! Invalid GPT signature at LBA 1!\n");
++				}
++			} else {
++				printf("HTTPD: ERROR! GPT size invalid (%zu bytes)!\n", upload_size);
++			}
++			break;
++
++		case FW_TYPE_BL2:
++			printf("HTTPD: Validating ATF BL2 Preloader image...\n");
++			if (upload_size >= 0x4000 && upload_size <= 0x80000) {
++				const char *d = (const char *)upload_addr;
++				if (memcmp(d, "EMMC_BOOT", 9) == 0 ||
++				    memcmp(d, "SDMMC_BOOT", 10) == 0 ||
++				    memcmp(d, "SPINAND!", 8) == 0 ||
++				    memcmp(d, "SF_BOOT", 7) == 0 ||
++				    memcmp(d, "BRLYT", 5) == 0) {
++					valid = 1;
++					cmd = "run web_failsafe_bl2";
++				} else {
++					printf("HTTPD: ERROR! Invalid BL2 / BootROM header signature!\n");
++				}
++			} else {
++				printf("HTTPD: ERROR! BL2 size exceeds 512KB limit (%zu bytes)!\n", upload_size);
++			}
++			break;
++
++		default:
++			printf("HTTPD: Unknown upload mode %d!\n", upload_mode);
++			break;
++		}
++
++		if (!valid) {
++			printf("HTTPD: Flash aborted due to validation failure!\n");
++			return;
++		}
++
++		printf("HTTPD: Validation passed. Executing: %s ...\n", cmd);
++		int ret = run_command(cmd, 0);
 +		if (ret == 0) {
-+			printf("HTTPD: Flash succeeded! Rebooting into new system...\n");
-+			mdelay(2000);
-+			do_reset(NULL, 0, 0, NULL);
++			if (do_reboot) {
++				printf("HTTPD: Action succeeded! Rebooting into new system...\n");
++				mdelay(2000);
++				do_reset(NULL, 0, 0, NULL);
++			} else {
++				printf("HTTPD: RAM boot handover complete.\n");
++			}
 +		} else {
-+			printf("HTTPD: Flash failed or rejected! (code %d)\n", ret);
++			printf("HTTPD: Command failed or rejected! (code %d)\n", ret);
 +		}
 +	}
 +}
