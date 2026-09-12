@@ -26,7 +26,7 @@
  obj-$(CONFIG_CMD_IMX8) += imx8.o
 --- /dev/null
 +++ b/cmd/httpd.c
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,43 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -179,7 +179,7 @@
 +#define UIP_ETHTYPE_ARP 0x0806
 +#define UIP_ETHTYPE_IP  0x0800
 +
- struct arp_hdr {
++struct arp_hdr {
 +	struct uip_eth_hdr ethhdr;
 +	u16_t hwtype;
 +	u16_t protocol;
@@ -204,7 +204,7 @@
 +#endif
 --- /dev/null
 +++ b/include/net/uip.h
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,142 @@
 +/* SPDX-License-Identifier: BSD-3-Clause */
 +/*
 + * Minimal uIP TCP/IP stack definitions for U-Boot HTTPD
@@ -349,7 +349,7 @@
 +#endif
 --- /dev/null
 +++ b/net/uip_arp.c
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,78 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal ARP implementation for uIP
@@ -430,7 +430,7 @@
 +}
 --- /dev/null
 +++ b/net/uip.c
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,264 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP TCP State Machine Implementation
@@ -697,7 +697,7 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,217 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
