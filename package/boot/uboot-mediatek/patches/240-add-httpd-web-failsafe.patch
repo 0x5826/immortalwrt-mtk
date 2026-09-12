@@ -18,25 +18,24 @@
 +++ b/cmd/Makefile
 @@ -98,6 +98,7 @@ obj-$(CONFIG_CMD_HVC) += smccc.o
  obj-$(CONFIG_CMD_I2C) += i2c.o
- obj-$(CONFIG_CMD_I3C) += i3c.o
  obj-$(CONFIG_CMD_IOTRACE) += iotrace.o
-+obj-$(CONFIG_CMD_HTTPD) += httpd.o
  obj-$(CONFIG_CMD_HASH) += hash.o
- obj-$(CONFIG_CMD_IDE) += ide.o disk.o
- obj-$(CONFIG_CMD_INI) += ini.o
++obj-$(CONFIG_CMD_HTTPD) += httpd.o
+ obj-$(CONFIG_CMD_IDE) += ide.o
+ obj-$(CONFIG_CMD_IMX8) += imx8.o
+ obj-$(CONFIG_CMD_IMX9) += imx9.o
 --- /dev/null
 +++ b/cmd/httpd.c
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,42 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
 + * Web Failsafe Command for BPi-R4 and MediaTek Platforms
 + */
 +
++#include <common.h>
 +#include <command.h>
-+#include <env.h>
 +#include <net.h>
-+#include <stdio.h>
 +#include <net/httpd.h>
 +
 +static int do_httpd(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
@@ -73,38 +72,26 @@
 --- a/include/net-legacy.h
 +++ b/include/net-legacy.h
 @@ -308,6 +308,9 @@ enum proto_t {
- 	BOOTP, RARP, ARP, TFTPGET, DHCP, DHCP6, PING, PING6, DNS, NFS, CDP,
- 	NETCONS, SNTP, TFTPSRV, TFTPPUT, LINKLOCAL, FASTBOOT_UDP, FASTBOOT_TCP,
- 	WOL, UDP, NCSI, WGET, RS
-+#if defined(CONFIG_CMD_HTTPD)
-+	, HTTPD
-+#endif
+ 	FASTBOOT_UDP,
+ 	FASTBOOT_TCP,
+ 	WGET,
++	HTTPD,
  };
  
- /* Indicates whether the file name was specified on the command line */
+ extern char	net_boot_file_name[1024];/* Boot File name */
 --- a/net/Makefile
 +++ b/net/Makefile
 @@ -25,6 +25,7 @@ obj-$(CONFIG_CMD_WOL)  += wol.o
  obj-$(CONFIG_PROT_UDP) += udp.o
- obj-$(CONFIG_PROT_TCP) += tcp.o
- obj-$(CONFIG_WGET) += wget.o
+ obj-$(CONFIG_CMD_WGET) += wget.o
+ obj-$(CONFIG_CMD_WGET) += tcp.o
 +obj-$(CONFIG_CMD_HTTPD) += httpd.o uip.o uip_arp.o
  
- # Disable this warning as it is triggered by:
- # sprintf(buf, index ? "foo%d" : "foo", index)
+ # Disable test-coverage.o while building other libraries
+ CFLAGS_test-coverage.o := $(CFLAGS_test-coverage.o:-fprofile-arcs=)
 --- a/net/net.c
 +++ b/net/net.c
-@@ -115,6 +115,9 @@
- #include <net/udp.h>
- #include <net/wget.h>
- #include <test/test.h>
-+#if defined(CONFIG_CMD_HTTPD)
-+#include <net/httpd.h>
-+#endif
- #include "arp.h"
- #include "bootp.h"
- #include "cdp.h"
-@@ -578,6 +581,11 @@ restart:
+@@ -530,6 +530,11 @@ restart:
  		case WGET:
  			wget_start();
  			break;
@@ -114,33 +101,33 @@
 +			httpd_start();
 +			break;
  #endif
- #if defined(CONFIG_CMD_CDP)
- 		case CDP:
-@@ -663,6 +671,10 @@ restart:
- #if defined(CONFIG_PROT_TCP)
- 		tcp_streams_poll();
- #endif
+ 		default:
+ 			break;
+@@ -675,6 +680,11 @@ restart:
+ 		}
+ 
+ 		eth_rx();
++
 +#if defined(CONFIG_CMD_HTTPD)
-+		if (net_state == NETLOOP_CONTINUE && protocol == HTTPD)
++		if (net_state == NETLOOP_LOOP && protocol == HTTPD)
 +			httpd_poll();
 +#endif
  
- 		/*
- 		 *	Abort if ctrl-c was pressed.
-@@ -1245,6 +1257,13 @@ void net_process_received_packet(uchar *
- 	if (len < ETHER_HDR_SIZE)
- 		return;
+ 	}
  
+@@ -1245,6 +1255,12 @@ void net_process_received_packet(uchar *
+ 		net_set_state(NETLOOP_FAIL);
+ 		return;
+ 	}
++
 +#if defined(CONFIG_CMD_HTTPD)
 +	if (httpd_is_active()) {
-+		if (httpd_rx(in_packet, len))
-+			return;
++		httpd_rx(in_packet, len);
 +	}
 +#endif
-+
- #if defined(CONFIG_API) || defined(CONFIG_EFI_LOADER)
- 	if (push_packet) {
- 		(*push_packet)(in_packet, len);
+ 
+ 	if (len < ETHER_HDR_SIZE)
+ 		return;
 --- /dev/null
 +++ b/include/net/httpd.h
 @@ -0,0 +1,19 @@
@@ -207,7 +194,7 @@
 +#endif
 --- /dev/null
 +++ b/include/net/uip.h
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,110 @@
 +/* SPDX-License-Identifier: BSD-3-Clause */
 +/*
 + * Minimal uIP TCP/IP stack definitions for U-Boot HTTPD
@@ -253,45 +240,41 @@
 +	u16_t len;
 +	u32_t timer;
 +	u8_t tcpstateflags;
-+	void *appstate;
++	const char *tx_ptr;
++	int tx_left;
 +};
 +
 +#define UIP_TCP_CONNS 4
 +#define UIP_BUFSIZE   1514
-+
 +#define UIP_LLH_LEN   14
-+#define UIP_IPH_LEN   20
-+#define UIP_TCPH_LEN  20
-+#define UIP_IPTCPH_LEN (UIP_IPH_LEN + UIP_TCPH_LEN)
 +
-+extern u8_t uip_buf[UIP_BUFSIZE + 2];
-+extern void *uip_appdata;
-+extern u16_t uip_len;
-+extern u16_t uip_slen;
-+extern u8_t uip_flags;
-+extern struct uip_tcp_conn *uip_conn;
-+extern struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++#define UIP_CLOSED      0
++#define UIP_SYN_RCVD    1
++#define UIP_ESTABLISHED 2
++#define UIP_FIN_WAIT_1  3
++#define UIP_FIN_WAIT_2  4
++#define UIP_CLOSING     5
++#define UIP_TIME_WAIT   6
++#define UIP_LAST_ACK    7
++#define UIP_TS_MASK     15
 +
-+/* uIP flags */
-+#define UIP_ACKDATA     0x01
-+#define UIP_NEWDATA     0x02
-+#define UIP_CLOSE       0x04
-+#define UIP_ABORT       0x08
-+#define UIP_CONNECTED   0x10
-+#define UIP_TIMEDOUT    0x20
-+#define UIP_POLL        0x40
++#define UIP_ACKDATA     1
++#define UIP_NEWDATA     2
++#define UIP_CLOSE       4
++#define UIP_ABORT       8
++#define UIP_CONNECTED   16
++#define UIP_TIMEDOUT    32
 +
-+#define uip_newdata()           (uip_flags & UIP_NEWDATA)
-+#define uip_acked()             (uip_flags & UIP_ACKDATA)
-+#define uip_connected()         (uip_flags & UIP_CONNECTED)
-+#define uip_closed()            (uip_flags & UIP_CLOSE)
-+#define uip_aborted()           (uip_flags & UIP_ABORT)
-+#define uip_timedout()          (uip_flags & UIP_TIMEDOUT)
-+#define uip_poll()              (uip_flags & UIP_POLL)
-+#define uip_datalen()           uip_len
++#define uip_newdata()   (uip_flags & UIP_NEWDATA)
++#define uip_acked()     (uip_flags & UIP_ACKDATA)
++#define uip_connected() (uip_flags & UIP_CONNECTED)
++#define uip_closed()    (uip_flags & UIP_CLOSE)
++#define uip_aborted()   (uip_flags & UIP_ABORT)
++#define uip_timedout()  (uip_flags & UIP_TIMEDOUT)
++#define uip_datalen()   uip_len
 +
-+#define uip_send(buf, len) do { \
-+	uip_appdata = (buf); \
++#define uip_send(data, len) do { \
++	uip_sappdata = (data); \
 +	uip_slen = (len); \
 +} while (0)
 +
@@ -299,64 +282,35 @@
 +	uip_flags |= UIP_CLOSE; \
 +} while (0)
 +
-+#define uip_abort() do { \
-+	uip_flags |= UIP_ABORT; \
-+} while (0)
-+
-+/* IP / TCP Headers */
-+struct uip_tcpip_hdr {
-+	u8_t vhl, tos, len[2], ipid[2], ipoffset[2], ttl, proto;
-+	u16_t ipchksum;
-+	u16_t srcipaddr[2], destipaddr[2];
-+	u16_t srcport, destport;
-+	u8_t seqno[4], ackno[4], tcpoffset, flags, wnd[2];
-+	u16_t tcpchksum;
-+	u8_t urgp[2];
-+} __attribute__((packed));
-+
-+#define UIP_PROTO_ICMP  1
-+#define UIP_PROTO_TCP   6
-+#define UIP_PROTO_UDP   17
-+
-+#define TCP_FIN 0x01
-+#define TCP_SYN 0x02
-+#define TCP_RST 0x04
-+#define TCP_PSH 0x08
-+#define TCP_ACK 0x10
-+#define TCP_URG 0x20
-+#define TCP_CTL 0x3f
-+
-+#define UIP_CLOSED      0
-+#define UIP_SYN_RCVD    1
-+#define UIP_SYN_SENT    2
-+#define UIP_ESTABLISHED 3
-+#define UIP_FIN_WAIT_1  4
-+#define UIP_FIN_WAIT_2  5
-+#define UIP_CLOSING     6
-+#define UIP_TIME_WAIT   7
-+#define UIP_LAST_ACK    8
++extern u8_t uip_buf[UIP_BUFSIZE + 2];
++extern void *uip_appdata;
++extern void *uip_sappdata;
++extern u16_t uip_len;
++extern u16_t uip_slen;
++extern u8_t uip_flags;
++extern struct uip_tcp_conn *uip_conn;
++extern struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
 +
 +void uip_init(void);
-+void uip_sethostaddr(uip_ipaddr_t addr);
-+void uip_setnetmask(uip_ipaddr_t addr);
-+void uip_setdraddr(uip_ipaddr_t addr);
-+void uip_setethaddr(struct uip_eth_addr addr);
++void uip_listen(u16_t port);
 +void uip_input(void);
 +void uip_periodic(int conn);
-+void uip_listen(u16_t port);
 +void uip_appcall(void);
 +
 +u16_t uip_chksum(u16_t *buf, u16_t len);
 +u16_t uip_ipchksum(void);
 +u16_t uip_tcpchksum(void);
 +
-+#endif
++void uip_sethostaddr(uip_ipaddr_t addr);
++void uip_setethaddr(struct uip_eth_addr addr);
++
++#endif /* __UIP_H__ */
 --- /dev/null
 +++ b/net/uip_arp.c
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,83 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
-+ * Minimal ARP implementation for uIP
++ * Minimal uIP ARP implementation
 + */
 +
 +#include <linux/types.h>
@@ -365,31 +319,32 @@
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
 +
-+static struct uip_eth_addr ethaddr;
++#define BUF   ((struct uip_arp_hdr *)&uip_buf[0])
++#define IPBUF ((struct uip_eth_hdr *)&uip_buf[0])
++
++static struct uip_eth_addr default_ethaddr;
 +static struct uip_eth_addr client_ethaddr;
-+uip_ipaddr_t hostaddr;
-+
-+#define BUF ((struct uip_arp_hdr *)&uip_buf[0])
-+#define IPBUF ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
-+
-+void uip_arp_init(void)
-+{
-+	memset(&client_ethaddr, 0, sizeof(client_ethaddr));
-+}
++static int client_ethaddr_valid = 0;
 +
 +void uip_setethaddr(struct uip_eth_addr addr)
 +{
-+	ethaddr = addr;
++	default_ethaddr = addr;
 +}
 +
 +void uip_set_client_ethaddr(struct uip_eth_addr addr)
 +{
 +	client_ethaddr = addr;
++	client_ethaddr_valid = 1;
 +}
 +
-+void uip_sethostaddr(uip_ipaddr_t addr)
++void uip_arp_init(void)
 +{
-+	uip_ipaddr_copy(hostaddr, addr);
++	client_ethaddr_valid = 0;
++}
++
++void uip_arp_ipin(void)
++{
++	uip_set_client_ethaddr(IPBUF->src);
 +}
 +
 +void uip_arp_arpin(void)
@@ -399,50 +354,46 @@
 +		return;
 +	}
 +
-+	uip_len = 0;
-+	switch (BUF->opcode) {
-+	case htons(ARP_REQUEST):
-+		if (uip_ipaddr_cmp(BUF->dipaddr, hostaddr)) {
-+			BUF->opcode = htons(ARP_REPLY);
-+			memcpy(client_ethaddr.addr, BUF->shwaddr.addr, 6);
-+			memcpy(BUF->dhwaddr.addr, BUF->shwaddr.addr, 6);
-+			memcpy(BUF->shwaddr.addr, ethaddr.addr, 6);
-+			memcpy(BUF->ethhdr.src.addr, ethaddr.addr, 6);
-+			memcpy(BUF->ethhdr.dest.addr, BUF->dhwaddr.addr, 6);
++	if (BUF->opcode == htons(ARP_REQUEST)) {
++		uip_set_client_ethaddr(BUF->shwaddr);
 +
-+			BUF->dipaddr[0] = BUF->sipaddr[0];
-+			BUF->dipaddr[1] = BUF->sipaddr[1];
-+			BUF->sipaddr[0] = hostaddr[0];
-+			BUF->sipaddr[1] = hostaddr[1];
++		BUF->opcode = htons(ARP_REPLY);
 +
-+			BUF->ethhdr.type = htons(UIP_ETHTYPE_ARP);
-+			uip_len = sizeof(struct uip_arp_hdr);
-+		}
-+		break;
-+	default:
-+		break;
++		memcpy(BUF->dhwaddr.addr, BUF->shwaddr.addr, 6);
++		memcpy(BUF->shwaddr.addr, default_ethaddr.addr, 6);
++		memcpy(BUF->ethhdr.dest.addr, BUF->dhwaddr.addr, 6);
++		memcpy(BUF->ethhdr.src.addr, default_ethaddr.addr, 6);
++
++		BUF->dipaddr[0] = BUF->sipaddr[0];
++		BUF->dipaddr[1] = BUF->sipaddr[1];
++
++		extern uip_ipaddr_t hostaddr;
++		BUF->sipaddr[0] = ((u16_t *)hostaddr)[0];
++		BUF->sipaddr[1] = ((u16_t *)hostaddr)[1];
++
++		BUF->ethhdr.type = htons(UIP_ETHTYPE_ARP);
++		uip_len = sizeof(struct uip_arp_hdr);
++		return;
 +	}
-+}
 +
-+void uip_arp_ipin(void)
-+{
++	uip_len = 0;
 +}
 +
 +void uip_arp_out(void)
 +{
-+	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)&uip_buf[0];
-+
-+	if (eth->type == htons(UIP_ETHTYPE_ARP))
++	if (!client_ethaddr_valid) {
++		uip_len = 0;
 +		return;
++	}
 +
-+	memcpy(eth->src.addr, ethaddr.addr, 6);
-+	memcpy(eth->dest.addr, client_ethaddr.addr, 6);
-+	eth->type = htons(UIP_ETHTYPE_IP);
++	memcpy(IPBUF->dest.addr, client_ethaddr.addr, 6);
++	memcpy(IPBUF->src.addr, default_ethaddr.addr, 6);
++	IPBUF->type = htons(UIP_ETHTYPE_IP);
 +	uip_len += UIP_LLH_LEN;
 +}
 --- /dev/null
 +++ b/net/uip.c
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,324 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP TCP State Machine Implementation
@@ -450,60 +401,83 @@
 +
 +#include <linux/types.h>
 +#include <linux/string.h>
-+#include <stdio.h>
 +#include <asm/byteorder.h>
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
 +
-+u8_t uip_buf[UIP_BUFSIZE + 2];
-+void *uip_appdata;
-+u16_t uip_len;
-+u16_t uip_slen;
-+u8_t uip_flags;
-+struct uip_tcp_conn *uip_conn;
-+struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++#define UIP_TCPH_LEN    20
++#define UIP_IPH_LEN     20
++#define UIP_IPTCPH_LEN  (UIP_TCPH_LEN + UIP_IPH_LEN)
 +
-+extern uip_ipaddr_t hostaddr;
-+
-+static u16_t uip_listenport;
-+static u16_t ipid;
++struct uip_tcpip_hdr {
++	u8_t  vhl, tos, len[2], ipid[2], ipoffset[2], ttl, proto;
++	u16_t ipchksum;
++	u16_t srcipaddr[2], destipaddr[2];
++	u16_t srcport, destport;
++	u8_t  seqno[4], ackno[4], tcpoffset, flags, wnd[2];
++	u16_t tcpchksum;
++	u8_t  urgp[2];
++};
 +
 +#define BUF ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
 +
-+u16_t uip_chksum(u16_t *buf, u16_t len)
++#define TCP_FIN 0x01
++#define TCP_SYN 0x02
++#define TCP_RST 0x04
++#define TCP_PSH 0x08
++#define TCP_ACK 0x10
++#define TCP_URG 0x20
++
++#define UIP_PROTO_TCP  6
++
++u8_t uip_buf[UIP_BUFSIZE + 2] __attribute__((aligned(4)));
++void *uip_appdata = NULL;
++void *uip_sappdata = NULL;
++u16_t uip_len = 0;
++u16_t uip_slen = 0;
++u8_t uip_flags = 0;
++struct uip_tcp_conn *uip_conn = NULL;
++struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++static u16_t uip_listenport = 0;
++uip_ipaddr_t hostaddr;
++static u16_t ipid = 0;
++
++void uip_sethostaddr(uip_ipaddr_t addr)
 +{
-+	u32_t sum = 0;
-+	while (len > 1) {
-+		sum += *buf++;
-+		len -= 2;
-+	}
-+	if (len == 1)
-+		sum += *(u8_t *)buf;
-+	while (sum >> 16)
-+		sum = (sum & 0xffff) + (sum >> 16);
-+	return (u16_t)~sum;
++	uip_ipaddr_copy(hostaddr, addr);
++}
++
++u16_t uip_chksum(u16_t *sdata, u16_t len)
++{
++	u32_t acc = 0;
++	for (int i = 0; i < len / 2; ++i)
++		acc += ntohs(sdata[i]);
++	if (len & 1)
++		acc += ((u8_t *)sdata)[len - 1] << 8;
++	while (acc >> 16)
++		acc = (acc & 0xffff) + (acc >> 16);
++	return htons((u16_t)acc);
 +}
 +
 +u16_t uip_ipchksum(void)
 +{
-+	return uip_chksum((u16_t *)&uip_buf[UIP_LLH_LEN], 20);
++	u16_t sum = uip_chksum((u16_t *)&uip_buf[UIP_LLH_LEN], UIP_IPH_LEN);
++	return (sum == 0) ? 0xffff : sum;
 +}
 +
 +u16_t uip_tcpchksum(void)
 +{
-+	u32_t sum = 0;
-+	u16_t tlen = uip_len - 20;
++	u16_t len = uip_len - UIP_IPH_LEN;
++	u32_t sum = len + UIP_PROTO_TCP;
++	sum += ntohs(BUF->srcipaddr[0]);
++	sum += ntohs(BUF->srcipaddr[1]);
++	sum += ntohs(BUF->destipaddr[0]);
++	sum += ntohs(BUF->destipaddr[1]);
 +
-+	sum += BUF->srcipaddr[0];
-+	sum += BUF->srcipaddr[1];
-+	sum += BUF->destipaddr[0];
-+	sum += BUF->destipaddr[1];
-+	sum += htons(UIP_PROTO_TCP);
-+	sum += htons(tlen);
-+
-+	u16_t *p = (u16_t *)&uip_buf[UIP_LLH_LEN + 20];
++	u16_t *p = (u16_t *)&uip_buf[UIP_LLH_LEN + UIP_IPH_LEN];
++	u16_t tlen = len;
 +	while (tlen > 1) {
-+		sum += *p++;
++		sum += ntohs(*p++);
 +		tlen -= 2;
 +	}
 +	if (tlen == 1)
@@ -516,8 +490,11 @@
 +void uip_init(void)
 +{
 +	int i;
-+	for (i = 0; i < UIP_TCP_CONNS; ++i)
++	for (i = 0; i < UIP_TCP_CONNS; ++i) {
 +		uip_conns[i].tcpstateflags = UIP_CLOSED;
++		uip_conns[i].tx_ptr = NULL;
++		uip_conns[i].tx_left = 0;
++	}
 +	uip_listenport = 0;
 +}
 +
@@ -562,6 +539,8 @@
 +
 +	if (uip_conn && (BUF->flags & TCP_SYN)) {
 +		uip_conn->tcpstateflags = UIP_CLOSED;
++		uip_conn->tx_ptr = NULL;
++		uip_conn->tx_left = 0;
 +		uip_conn = NULL;
 +	}
 +
@@ -586,6 +565,8 @@
 +		uip_conn->rport = BUF->srcport;
 +		uip_ipaddr_copy(uip_conn->ripaddr, BUF->srcipaddr);
 +		uip_conn->tcpstateflags = UIP_SYN_RCVD;
++		uip_conn->tx_ptr = NULL;
++		uip_conn->tx_left = 0;
 +
 +		u32_t r_seq = ((u32_t)BUF->seqno[0] << 24) | ((u32_t)BUF->seqno[1] << 16) |
 +			      ((u32_t)BUF->seqno[2] << 8) | BUF->seqno[3];
@@ -597,25 +578,27 @@
 +		BUF->wnd[0] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) >> 8;
 +		BUF->wnd[1] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) & 0xff;
 +
-+		uip_conn->snd_nxt[0] = (l_seq + 1) >> 24;
-+		uip_conn->snd_nxt[1] = (l_seq + 1) >> 16;
-+		uip_conn->snd_nxt[2] = (l_seq + 1) >> 8;
-+		uip_conn->snd_nxt[3] = (l_seq + 1);
-+
 +		uip_conn->rcv_nxt[0] = (r_seq + 1) >> 24;
 +		uip_conn->rcv_nxt[1] = (r_seq + 1) >> 16;
 +		uip_conn->rcv_nxt[2] = (r_seq + 1) >> 8;
 +		uip_conn->rcv_nxt[3] = (r_seq + 1);
 +
++		uip_conn->snd_nxt[0] = (l_seq + 1) >> 24;
++		uip_conn->snd_nxt[1] = (l_seq + 1) >> 16;
++		uip_conn->snd_nxt[2] = (l_seq + 1) >> 8;
++		uip_conn->snd_nxt[3] = (l_seq + 1);
++
++		uip_slen = 0;
 +		goto send_pkt;
 +	}
 +
-+	/* Established state */
-+	u32_t cur_seq = ((u32_t)BUF->seqno[0] << 24) | ((u32_t)BUF->seqno[1] << 16) |
-+			((u32_t)BUF->seqno[2] << 8) | BUF->seqno[3];
-+
++	/* Existing connection packet processing */
 +	if (BUF->flags & TCP_RST) {
 +		uip_conn->tcpstateflags = UIP_CLOSED;
++		uip_conn->tx_ptr = NULL;
++		uip_conn->tx_left = 0;
++		uip_flags = UIP_ABORT;
++		uip_appcall();
 +		uip_len = 0;
 +		return;
 +	}
@@ -623,8 +606,14 @@
 +	if (uip_conn->tcpstateflags == UIP_SYN_RCVD) {
 +		if (BUF->flags & TCP_ACK) {
 +			uip_conn->tcpstateflags = UIP_ESTABLISHED;
++			uip_flags = UIP_CONNECTED;
++			uip_slen = 0;
++			uip_appcall();
 +		}
 +	}
++
++	u32_t cur_seq = ((u32_t)uip_conn->rcv_nxt[0] << 24) | ((u32_t)uip_conn->rcv_nxt[1] << 16) |
++			((u32_t)uip_conn->rcv_nxt[2] << 8) | uip_conn->rcv_nxt[3];
 +
 +	len = (BUF->len[0] << 8) | BUF->len[1];
 +	len -= (BUF->vhl & 0x0f) * 4 + ((BUF->tcpoffset >> 4) * 4);
@@ -655,6 +644,8 @@
 +		uip_conn->rcv_nxt[2] = cur_seq >> 8;
 +		uip_conn->rcv_nxt[3] = cur_seq;
 +		uip_conn->tcpstateflags = UIP_CLOSED;
++		uip_conn->tx_ptr = NULL;
++		uip_conn->tx_left = 0;
 +	}
 +
 +	uip_appcall();
@@ -675,6 +666,8 @@
 +			BUF->flags |= TCP_FIN;
 +			snd += 1;
 +			uip_conn->tcpstateflags = UIP_CLOSED;
++			uip_conn->tx_ptr = NULL;
++			uip_conn->tx_left = 0;
 +		}
 +		uip_conn->snd_nxt[0] = snd >> 24;
 +		uip_conn->snd_nxt[1] = snd >> 16;
@@ -727,7 +720,7 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,366 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -764,53 +757,9 @@
 +
 +static int upload_mode = FW_TYPE_FIRMWARE;
 +
-+static const char *tx_ptr = NULL;
-+static int tx_left = 0;
-+
-+/* Beautiful hanwckf-style 5-in-1 Web Failsafe Dashboard */
-+static const char html_page[] =
-+"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>BPi-R4 Recovery</title>"
-+"<style>body{font:12px Arial,sans-serif;background:#ededed;margin:8% auto;width:420px}"
-+"#m{background:#fff;padding:24px;border-radius:8px;box-shadow:0 0 12px #ccc}"
-+"h2{font:bold 22px Tahoma;color:#2450ad;margin:0 0 12px;text-align:center}"
-+".tb{display:flex;border-bottom:2px solid #2450ad;margin-bottom:12px}"
-+".t{flex:1;text-align:center;padding:6px 0;cursor:pointer;background:#e2e6ea;font-weight:bold;font-size:11px;color:#495057}"
-+".t.a{background:#2450ad;color:#fff}"
-+"#d{color:#555;font-size:12px;min-height:30px;text-align:center;margin:8px 0;line-height:16px}"
-+"input,button{width:100%;margin:6px 0;padding:8px;box-sizing:border-box}"
-+"button{background:#2dabf9;color:#fff;border:0;border-radius:4px;cursor:pointer;font-weight:bold;font-size:14px}"
-+"button:hover{background:#0688fa}button:disabled{background:#aaa;cursor:not-allowed}"
-+"#p{height:16px;background:#f0f0f0;border-radius:8px;overflow:hidden;display:none;margin:8px 0}"
-+"#pb{height:100%;width:0;background:#2486ff;color:#fff;font-size:11px;text-align:right;line-height:16px;padding-right:5px}"
-+"#w{background:#fefdce;border:1px solid #ffc643;padding:8px 12px;border-radius:4px;font-size:11px;color:#856404;margin-top:10px}"
-+"#w.e{background:#f8d7da;border-color:#f5c6cb;color:#721c24}"
-+"#msg{text-align:center;font-weight:bold;color:#2450ad;margin:6px 0}</style></head><body><div id=\"m\">"
-+"<h2>BPi-R4 RECOVERY</h2>"
-+"<div class=\"tb\">"
-+"<div class=\"t a\" onclick=\"s(0)\">Firmware</div>"
-+"<div class=\"t\" onclick=\"s(1)\">U-Boot</div>"
-+"<div class=\"t\" onclick=\"s(2)\">RAM Boot</div>"
-+"<div class=\"t\" onclick=\"s(3)\">GPT</div>"
-+"<div class=\"t\" onclick=\"s(4)\">BL2</div>"
-+"</div>"
-+"<div id=\"d\">Flash OpenWrt system (.itb) to Production partition.</div>"
-+"<input type=\"file\" id=\"f\"><div id=\"p\"><div id=\"pb\"></div></div>"
-+"<button id=\"b\" onclick=\"up()\">Upload & Flash</button><div id=\"msg\"></div>"
-+"<div id=\"w\"><strong>WARNING:</strong> Do not power off. Device will reboot after flash.</div>"
-+"</div>"
-+"<script>"
-+"var T=['firmware','fip','initramfs','gpt','bl2'];"
-+"var D=['Flash OpenWrt system (.itb) to Production partition.','Flash BL31 + U-Boot FIP image (.fip).','Test boot Linux in RAM without flashing disk.','Flash GPT partition table image (17KB).','DANGER: Flash ATF BL2 preloader image.'];"
-+"var W=['Do not power off. Device will reboot after flash.','Warning: Invalid FIP may corrupt bootloader.','Notice: Boots in memory only. Disk is untouched.','Warning: Overwrites partition layout!','DANGER: Flashing wrong BL2 will permanently brick board!'];"
-+"var c=0;"
-+"function s(i){c=i;document.querySelectorAll('.t').forEach(function(e,k){e.className=k===i?'t a':'t';});document.getElementById('d').innerText=D[i];var w=document.getElementById('w');w.className=i===4?'w e':'w';w.innerHTML='<strong>'+(i===4?'DANGER:':'WARNING:')+'</strong> '+W[i];document.getElementById('b').innerText=i===2?'Boot from RAM':'Upload & Flash';}"
-+"function up(){var f=document.getElementById('f').files[0];if(!f)return;document.getElementById('b').disabled=true;document.getElementById('p').style.display='block';var ok=false,x=new XMLHttpRequest();x.open('POST','/upload?type='+T[c]+'&size='+f.size,true);x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100),el=document.getElementById('pb');el.style.width=p+'%';el.innerText=p+'%';if(p>=100){ok=true;document.getElementById('msg').innerText=c===2?'Booting RAM kernel...':'Flashing! Rebooting in ~30s...';}else{document.getElementById('msg').innerText='Uploading: '+p+'%';}};x.onload=function(){ok=true;document.getElementById('msg').innerText=c===2?'Kernel loaded! Booting...':'Flashing! Rebooting in ~30s...';};x.onerror=function(){if(!ok){document.getElementById('msg').innerText='Upload Failed!';document.getElementById('b').disabled=false;}};x.send(f);}"
-+"</script></body></html>";
-+
-+static const char resp_200_hdr[] =
-+"HTTP/1.0 200 OK\r\n"
-+"Content-Type: text/html\r\n"
-+"Connection: close\r\n\r\n";
++/* Apple-style Clean Tech 5-in-1 Web Failsafe Dashboard */
++static const char recovery_page[] =
++"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>BPi-R4 Web Recovery</title><style>*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif;background:#f0f2f5;color:#1f2937;margin:0;padding:40px 15px}#card{max-width:580px;background:#fff;margin:0 auto;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,0.08);overflow:hidden;border:1px solid #e5e7eb}.hd{padding:20px 24px;border-bottom:1px solid #f3f4f6;display:flex;justify-content:space-between;align-items:center}.title{font-size:18px;font-weight:700;color:#0f172a;letter-spacing:-0.3px}.badge{background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;margin-left:8px}.sub{font-size:12px;color:#64748b;margin-top:2px}.stat{display:flex;align-items:center;font-size:11px;font-weight:600;color:#16a34a;background:#f0fdf4;padding:4px 10px;border-radius:20px;border:1px solid #bbf7d0}.dot{width:7px;height:7px;background:#22c55e;border-radius:50%;margin-right:6px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.4}}.body{padding:24px}.tabs{display:flex;background:#f1f5f9;padding:4px;border-radius:10px;margin-bottom:20px;gap:4px}.tab{flex:1;text-align:center;padding:8px 0;font-size:12px;font-weight:600;color:#64748b;border-radius:7px;cursor:pointer;transition:all .15s}.tab:hover{color:#0f172a}.tab.act{background:#fff;color:#0284c7;box-shadow:0 1px 3px rgba(0,0,0,0.1)}.drop{border:2px dashed #cbd5e1;border-radius:12px;padding:26px 16px;text-align:center;cursor:pointer;background:#f8fafc;transition:all .2s}.drop:hover{border-color:#0284c7;background:#f0f9ff}.icon{font-size:32px;line-height:1;margin-bottom:8px;color:#0284c7}.dtit{font-size:13px;font-weight:600;color:#334155}.dsub{font-size:11px;color:#64748b;margin-top:4px}.finfo{display:none;margin-top:8px;font-size:12px;font-weight:600;color:#0284c7;word-break:break-all}#p{height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;display:none;margin:16px 0 6px}#pb{height:100%;width:0;background:#0284c7;transition:width .1s}#msg{text-align:center;font-size:12px;font-weight:700;color:#0284c7;min-height:18px;margin:6px 0}#btn{width:100%;margin-top:14px;padding:12px;background:#0284c7;color:#fff;border:0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;box-shadow:0 2px 6px rgba(2,132,199,0.25);transition:all .2s}#btn:hover{background:#0369a1}#btn:disabled{background:#94a3b8;cursor:not-allowed;box-shadow:none}#btn.danger{background:#dc2626;box-shadow:0 2px 6px rgba(220,38,38,0.25)}#btn.danger:hover{background:#b91c1c}.tip{margin-top:16px;padding:10px 14px;border-radius:8px;font-size:11px;line-height:16px;background:#fef9c3;border:1px solid #fef08a;color:#854d0e}.tip.dang{background:#fef2f2;border-color:#fecaca;color:#991b1b}.tip b{margin-right:6px}</style></head><body><div id=\"card\"><div class=\"hd\"><div><span class=\"title\">Banana Pi BPi-R4</span><span class=\"badge\">MT7988A</span><div class=\"sub\">Quad-Core A73 \u00b7 4GB DDR4 \u00b7 Web Failsafe</div></div><div class=\"stat\"><span class=\"dot\"></span>192.168.1.1</div></div><div class=\"body\"><div class=\"tabs\"><div class=\"tab act\" onclick=\"s(0)\">\u7cfb\u7edf\u56fa\u4ef6</div><div class=\"tab\" onclick=\"s(1)\">U-Boot</div><div class=\"tab\" onclick=\"s(2)\">RAM \u542f\u52a8</div><div class=\"tab\" onclick=\"s(3)\">GPT \u5206\u533a</div><div class=\"tab\" onclick=\"s(4)\">BL2 \u5f15\u5bfc</div></div><input type=\"file\" id=\"fi\" style=\"display:none\" onchange=\"fc(this)\"><div class=\"drop\" onclick=\"document.getElementById('fi').click()\"><div class=\"icon\">\u2601</div><div class=\"dtit\" id=\"dt\">\u70b9\u51fb\u9009\u62e9\u6216\u62d6\u62fd\u6587\u4ef6\u5230\u6b64\u5904</div><div class=\"dsub\" id=\"ds\">\u652f\u6301\u5b98\u65b9 sysupgrade.itb \u683c\u5f0f\u56fa\u4ef6</div><div class=\"finfo\" id=\"fi_info\"></div></div><div id=\"p\"><div id=\"pb\"></div></div><div id=\"msg\"></div><button id=\"btn\" onclick=\"up()\">\u4e0a\u4f20\u5e76\u5f00\u59cb\u5237\u5199</button><div class=\"tip\" id=\"w\"><b>\u63d0\u793a:</b> \u5237\u5199\u8fc7\u7a0b\u4e2d\u8bf7\u52ff\u65ad\u7535\uff0c\u5199\u5165\u5b8c\u6210\u540e\u8bbe\u5907\u5c06\u81ea\u52a8\u5b89\u5168\u91cd\u542f\u3002</div></div></div><script>var T=['firmware','fip','initramfs','gpt','bl2'];var D=['\u652f\u6301\u5b98\u65b9 sysupgrade.itb \u683c\u5f0f\u56fa\u4ef6','\u652f\u6301 BL31 + U-Boot FIP \u955c\u50cf (.fip)','\u5185\u5b58\u4e2d\u76f4\u63a5\u542f\u52a8 Linux\uff0c\u4e0d\u4fee\u6539\u4efb\u4f55\u78c1\u76d8\u6570\u636e','\u91cd\u5199 MMC \u5b58\u50a8\u8bbe\u5907 GPT \u5206\u533a\u8868 (17KB)','\u9ad8\u5371\uff1a\u5199\u5165 ATF BL2 Preloader \u5f15\u5bfc\u4ee3\u7801'];var B=['\u4e0a\u4f20\u5e76\u5f00\u59cb\u5237\u5199','\u66f4\u65b0 U-Boot FIP','\u76f4\u63a5\u4ece\u5185\u5b58\u542f\u52a8','\u5199\u5165 GPT \u5206\u533a\u8868','\u5f3a\u5236\u5199\u5165 BL2 \u5f15\u5bfc'];var W=['\u5237\u5199\u8fc7\u7a0b\u4e2d\u8bf7\u52ff\u65ad\u7535\uff0c\u5199\u5165\u5b8c\u6210\u540e\u8bbe\u5907\u5c06\u81ea\u52a8\u5b89\u5168\u91cd\u542f\u3002','\u5237\u5199\u9519\u8bef\u7684 FIP \u53ef\u80fd\u5bfc\u81f4 Bootloader \u635f\u574f\uff0c\u8bf7\u52a1\u5fc5\u786e\u8ba4\u955c\u50cf\u3002','\u76f4\u63a5\u5c06\u5185\u6838\u8f7d\u5165\u5185\u5b58\u8fd0\u884c\uff0c\u78c1\u76d8\u4fdd\u6301\u539f\u6837\uff0c\u65ad\u7535\u540e\u5931\u6548\u3002','\u5c06\u8986\u5199\u73b0\u6709\u5b58\u50a8\u4ecb\u8d28\u7684\u5206\u533a\u5e03\u5c40\uff0c\u8bf7\u786e\u4fdd\u955c\u50cf\u4e0e\u4ecb\u8d28\u5339\u914d\uff01','\u9ad8\u5371\uff1a\u5199\u5165\u9519\u8bef\u7684 BL2 \u5c06\u5bfc\u81f4\u8bbe\u5907\u5f7b\u5e95\u53d8\u7816\u65e0\u6cd5\u542f\u52a8\uff01'];var c=0,selF=null;function s(i){c=i;document.querySelectorAll('.tab').forEach(function(e,k){e.className=k===i?'tab act':'tab';});document.getElementById('ds').innerText=D[i];document.getElementById('btn').innerText=B[i];var isD=(i===3||i===4);document.getElementById('btn').className=isD?'danger':'';var w=document.getElementById('w');w.className=isD?'tip dang':'tip';w.innerHTML='<b>'+(isD?'\u8b66\u544a:':'\u63d0\u793a:')+'</b> '+W[i];}function fc(inp){if(!inp.files||!inp.files[0])return;selF=inp.files[0];var sz=(selF.size/1048576).toFixed(2)+' MB';if(selF.size<1048576)sz=(selF.size/1024).toFixed(1)+' KB';var el=document.getElementById('fi_info');el.style.display='block';el.innerText='\u5df2\u9009\u62e9: '+selF.name+' ('+sz+')';}function up(){if(!selF)selF=document.getElementById('fi').files[0];if(!selF){alert('\u8bf7\u5148\u9009\u62e9\u5f85\u4e0a\u4f20\u7684\u6587\u4ef6');return;}document.getElementById('btn').disabled=true;document.getElementById('p').style.display='block';var ok=false,x=new XMLHttpRequest();x.open('POST','/upload?type='+T[c]+'&size='+selF.size,true);x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100);document.getElementById('pb').style.width=p+'%';if(p>=100){ok=true;document.getElementById('msg').innerText=c===2?'\u5185\u6838\u4f20\u8f93\u5b8c\u6210\uff0c\u6b63\u5728\u542f\u52a8...':'\u4f20\u8f93\u5b8c\u6210\uff0c\u6b63\u5728\u6821\u9a8c\u5e76\u5237\u5199...';}else{document.getElementById('msg').innerText='\u4e0a\u4f20\u8fdb\u5ea6: '+p+'%';}};x.onload=function(){ok=true;document.getElementById('msg').innerText=c===2?'\u7cfb\u7edf\u542f\u52a8\u4e2d...':'\u5237\u5199\u5b8c\u6210\uff01\u8bbe\u5907\u5c06\u5728 30 \u79d2\u5185\u91cd\u542f...';};x.onerror=function(){if(!ok){document.getElementById('msg').innerText='\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7\u5237\u65b0\u91cd\u8bd5';document.getElementById('btn').disabled=false;}};x.send(selF);}</script></body></html>";
 +
 +static const char resp_ok_hdr[] =
 +"HTTP/1.0 200 OK\r\n"
@@ -818,16 +767,16 @@
 +"Connection: close\r\n\r\n"
 +"Upload complete. Processing request...";
 +
-+static void send_next_chunk(void)
++static void send_next_chunk(struct uip_tcp_conn *conn)
 +{
-+	if (tx_left > 0) {
-+		int chunk = tx_left > 1400 ? 1400 : tx_left;
-+		uip_send((void *)tx_ptr, chunk);
-+		tx_ptr += chunk;
-+		tx_left -= chunk;
-+		if (tx_left == 0)
++	if (conn && conn->tx_left > 0) {
++		int chunk = conn->tx_left > 1400 ? 1400 : conn->tx_left;
++		uip_send((void *)conn->tx_ptr, chunk);
++		conn->tx_ptr += chunk;
++		conn->tx_left -= chunk;
++		if (conn->tx_left == 0)
 +			uip_close();
-+	} else {
++	} else if (conn) {
 +		uip_close();
 +	}
 +}
@@ -835,41 +784,39 @@
 +void uip_appcall(void)
 +{
 +	char *data = (char *)uip_appdata;
++	struct uip_tcp_conn *conn = uip_conn;
++
++	if (!conn)
++		return;
 +
 +	if (uip_connected()) {
-+		tx_ptr = NULL;
-+		tx_left = 0;
++		conn->tx_ptr = NULL;
++		conn->tx_left = 0;
 +		return;
 +	}
 +
-+	if (uip_acked()) {
-+		if (tx_left > 0) {
-+			send_next_chunk();
-+			return;
-+		}
++	if (uip_closed() || uip_timedout() || uip_aborted()) {
++		conn->tx_ptr = NULL;
++		conn->tx_left = 0;
++		return;
 +	}
 +
 +	if (uip_newdata()) {
-+		if (strncmp(data, "GET / ", 6) == 0 || strncmp(data, "GET /index.html", 15) == 0 ||
-+		    strncmp(data, "GET /favicon.ico", 16) == 0) {
-+			if (strncmp(data, "GET /favicon.ico", 16) == 0) {
-+				uip_send("HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n", 42);
-+				uip_close();
-+				return;
-+			}
++		conn->tx_ptr = NULL;
++		conn->tx_left = 0;
++
++		if (strncmp(data, "GET /favicon.ico", 16) == 0 ||
++		    strncmp(data, "GET /apple-touch-icon", 21) == 0) {
++			uip_send("HTTP/1.0 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", 65);
++			uip_close();
++			return;
++		}
++
++		if (strncmp(data, "GET / ", 6) == 0 || strncmp(data, "GET /index.html", 15) == 0) {
 +			printf("HTTPD: Delivering recovery web page...\n");
-+			static char full_page[4096];
-+			int hlen = strlen(resp_200_hdr);
-+			int plen = strlen(html_page);
-+			if (hlen + plen < sizeof(full_page)) {
-+				memcpy(full_page, resp_200_hdr, hlen);
-+				memcpy(full_page + hlen, html_page, plen);
-+				tx_ptr = full_page;
-+				tx_left = hlen + plen;
-+				send_next_chunk();
-+			} else {
-+				uip_close();
-+			}
++			conn->tx_ptr = recovery_page;
++			conn->tx_left = sizeof(recovery_page) - 1;
++			send_next_chunk(conn);
 +			return;
 +		}
 +
@@ -937,6 +884,14 @@
 +
 +		uip_send("HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n", 42);
 +		uip_close();
++		return;
++	}
++
++	if (uip_acked()) {
++		if (conn->tx_left > 0) {
++			send_next_chunk(conn);
++			return;
++		}
 +	}
 +}
 +
@@ -1099,32 +1054,33 @@
 +	if (len > UIP_BUFSIZE)
 +		len = UIP_BUFSIZE;
 +
-+	/* Save client MAC address so replies reach the client */
-+	uip_set_client_ethaddr(eth->src);
++	memcpy(uip_buf, pkt, len);
++	uip_len = len;
 +
-+	if (type == UIP_ETHTYPE_ARP) {
-+		memcpy(uip_buf, pkt, len);
-+		uip_len = len;
++	if (type == UIP_ETHTYPE_IP) {
++		uip_arp_ipin();
++		uip_input();
++		if (uip_len > 0) {
++			net_send_packet(uip_buf, uip_len);
++		}
++	} else if (type == UIP_ETHTYPE_ARP) {
 +		uip_arp_arpin();
 +		if (uip_len > 0) {
 +			net_send_packet(uip_buf, uip_len);
-+			return 1;
-+		}
-+		return 0;
-+	} else if (type == UIP_ETHTYPE_IP) {
-+		struct uip_tcpip_hdr *ip = (struct uip_tcpip_hdr *)(pkt + UIP_LLH_LEN);
-+		if (ip->proto == UIP_PROTO_TCP) {
-+			memcpy(uip_buf, pkt, len);
-+			uip_len = len;
-+			uip_arp_ipin();
-+			uip_input();
-+			if (uip_len > 0) {
-+				net_send_packet(uip_buf, uip_len);
-+			}
-+			return 1;
 +		}
 +	}
++
 +	return 0;
++}
++
++void httpd_poll_idle(void)
++{
++	for (int i = 0; i < UIP_TCP_CONNS; ++i) {
++		uip_periodic(i);
++		if (uip_len > 0) {
++			net_send_packet(uip_buf, uip_len);
++		}
++	}
 +}
 +
 +void httpd_stop(void)
