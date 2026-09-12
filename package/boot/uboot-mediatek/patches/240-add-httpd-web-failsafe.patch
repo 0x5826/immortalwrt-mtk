@@ -18,24 +18,25 @@
 +++ b/cmd/Makefile
 @@ -98,6 +98,7 @@ obj-$(CONFIG_CMD_HVC) += smccc.o
  obj-$(CONFIG_CMD_I2C) += i2c.o
+ obj-$(CONFIG_CMD_I3C) += i3c.o
  obj-$(CONFIG_CMD_IOTRACE) += iotrace.o
- obj-$(CONFIG_CMD_HASH) += hash.o
 +obj-$(CONFIG_CMD_HTTPD) += httpd.o
- obj-$(CONFIG_CMD_IDE) += ide.o
- obj-$(CONFIG_CMD_IMX8) += imx8.o
- obj-$(CONFIG_CMD_IMX9) += imx9.o
+ obj-$(CONFIG_CMD_HASH) += hash.o
+ obj-$(CONFIG_CMD_IDE) += ide.o disk.o
+ obj-$(CONFIG_CMD_INI) += ini.o
 --- /dev/null
 +++ b/cmd/httpd.c
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,43 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
 + * Web Failsafe Command for BPi-R4 and MediaTek Platforms
 + */
 +
-+#include <common.h>
 +#include <command.h>
++#include <env.h>
 +#include <net.h>
++#include <stdio.h>
 +#include <net/httpd.h>
 +
 +static int do_httpd(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
@@ -72,26 +73,38 @@
 --- a/include/net-legacy.h
 +++ b/include/net-legacy.h
 @@ -308,6 +308,9 @@ enum proto_t {
- 	FASTBOOT_UDP,
- 	FASTBOOT_TCP,
- 	WGET,
-+	HTTPD,
+ 	BOOTP, RARP, ARP, TFTPGET, DHCP, DHCP6, PING, PING6, DNS, NFS, CDP,
+ 	NETCONS, SNTP, TFTPSRV, TFTPPUT, LINKLOCAL, FASTBOOT_UDP, FASTBOOT_TCP,
+ 	WOL, UDP, NCSI, WGET, RS
++#if defined(CONFIG_CMD_HTTPD)
++	, HTTPD
++#endif
  };
  
- extern char	net_boot_file_name[1024];/* Boot File name */
+ /* Indicates whether the file name was specified on the command line */
 --- a/net/Makefile
 +++ b/net/Makefile
 @@ -25,6 +25,7 @@ obj-$(CONFIG_CMD_WOL)  += wol.o
  obj-$(CONFIG_PROT_UDP) += udp.o
- obj-$(CONFIG_CMD_WGET) += wget.o
- obj-$(CONFIG_CMD_WGET) += tcp.o
+ obj-$(CONFIG_PROT_TCP) += tcp.o
+ obj-$(CONFIG_WGET) += wget.o
 +obj-$(CONFIG_CMD_HTTPD) += httpd.o uip.o uip_arp.o
  
- # Disable test-coverage.o while building other libraries
- CFLAGS_test-coverage.o := $(CFLAGS_test-coverage.o:-fprofile-arcs=)
+ # Disable this warning as it is triggered by:
+ # sprintf(buf, index ? "foo%d" : "foo", index)
 --- a/net/net.c
 +++ b/net/net.c
-@@ -530,6 +530,11 @@ restart:
+@@ -115,6 +115,9 @@
+ #include <net/udp.h>
+ #include <net/wget.h>
+ #include <test/test.h>
++#if defined(CONFIG_CMD_HTTPD)
++#include <net/httpd.h>
++#endif
+ #include "arp.h"
+ #include "bootp.h"
+ #include "cdp.h"
+@@ -578,6 +581,11 @@ restart:
  		case WGET:
  			wget_start();
  			break;
@@ -101,33 +114,33 @@
 +			httpd_start();
 +			break;
  #endif
- 		default:
- 			break;
-@@ -675,6 +680,11 @@ restart:
- 		}
- 
- 		eth_rx();
-+
+ #if defined(CONFIG_CMD_CDP)
+ 		case CDP:
+@@ -663,6 +671,10 @@ restart:
+ #if defined(CONFIG_PROT_TCP)
+ 		tcp_streams_poll();
+ #endif
 +#if defined(CONFIG_CMD_HTTPD)
-+		if (net_state == NETLOOP_LOOP && protocol == HTTPD)
++		if (net_state == NETLOOP_CONTINUE && protocol == HTTPD)
 +			httpd_poll();
 +#endif
  
- 	}
- 
-@@ -1245,6 +1255,12 @@ void net_process_received_packet(uchar *
- 		net_set_state(NETLOOP_FAIL);
- 		return;
- 	}
-+
-+#if defined(CONFIG_CMD_HTTPD)
-+	if (httpd_is_active()) {
-+		httpd_rx(in_packet, len);
-+	}
-+#endif
- 
+ 		/*
+ 		 *	Abort if ctrl-c was pressed.
+@@ -1245,6 +1257,13 @@ void net_process_received_packet(uchar *
  	if (len < ETHER_HDR_SIZE)
  		return;
+ 
++#if defined(CONFIG_CMD_HTTPD)
++	if (httpd_is_active()) {
++		if (httpd_rx(in_packet, len))
++			return;
++	}
++#endif
++
+ #if defined(CONFIG_API) || defined(CONFIG_EFI_LOADER)
+ 	if (push_packet) {
+ 		(*push_packet)(in_packet, len);
 --- /dev/null
 +++ b/include/net/httpd.h
 @@ -0,0 +1,19 @@
@@ -720,7 +733,7 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,368 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -1063,11 +1076,13 @@
 +		if (uip_len > 0) {
 +			net_send_packet(uip_buf, uip_len);
 +		}
++		return 1;
 +	} else if (type == UIP_ETHTYPE_ARP) {
 +		uip_arp_arpin();
 +		if (uip_len > 0) {
 +			net_send_packet(uip_buf, uip_len);
 +		}
++		return 1;
 +	}
 +
 +	return 0;
