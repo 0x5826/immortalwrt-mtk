@@ -26,7 +26,7 @@
  obj-$(CONFIG_CMD_INI) += ini.o
 --- /dev/null
 +++ b/cmd/httpd.c
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,44 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -48,6 +48,7 @@
 +		env_set("ipaddr", "192.168.1.1");
 +		ip = "192.168.1.1";
 +	}
++	net_ip = string_to_ip(ip);
 +
 +	printf("\n=======================================================\n");
 +	printf("  Banana Pi BPi-R4 Web Failsafe HTTP Recovery Server\n");
@@ -165,7 +166,7 @@
 +#endif /* __NET_HTTPD_H__ */
 --- /dev/null
 +++ b/include/net/uip_arp.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +/* SPDX-License-Identifier: BSD-3-Clause */
 +#ifndef __UIP_ARP_H__
 +#define __UIP_ARP_H__
@@ -203,11 +204,12 @@
 +void uip_arp_ipin(void);
 +void uip_arp_arpin(void);
 +void uip_arp_out(void);
++void uip_setethaddr(struct uip_eth_addr addr);
 +void uip_set_client_ethaddr(struct uip_eth_addr addr);
 +#endif
 --- /dev/null
 +++ b/include/net/uip.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,94 @@
 +/* SPDX-License-Identifier: BSD-3-Clause */
 +/*
 + * Minimal uIP TCP/IP stack definitions for U-Boot HTTPD
@@ -250,50 +252,19 @@
 +	u16_t rport;
 +	u8_t rcv_nxt[4];
 +	u8_t snd_nxt[4];
-+	u16_t len;
-+	u32_t timer;
 +	u8_t tcpstateflags;
 +	const char *tx_ptr;
-+	int tx_left;
++	size_t tx_left;
 +};
-+
-+#define UIP_TCP_CONNS 4
-+#define UIP_BUFSIZE   1514
-+#define UIP_LLH_LEN   14
 +
 +#define UIP_CLOSED      0
 +#define UIP_SYN_RCVD    1
 +#define UIP_ESTABLISHED 2
 +#define UIP_FIN_WAIT_1  3
-+#define UIP_FIN_WAIT_2  4
-+#define UIP_CLOSING     5
-+#define UIP_TIME_WAIT   6
-+#define UIP_LAST_ACK    7
-+#define UIP_TS_MASK     15
++#define UIP_CLOSE_WAIT  4
 +
-+#define UIP_ACKDATA     1
-+#define UIP_NEWDATA     2
-+#define UIP_CLOSE       4
-+#define UIP_ABORT       8
-+#define UIP_CONNECTED   16
-+#define UIP_TIMEDOUT    32
-+
-+#define uip_newdata()   (uip_flags & UIP_NEWDATA)
-+#define uip_acked()     (uip_flags & UIP_ACKDATA)
-+#define uip_connected() (uip_flags & UIP_CONNECTED)
-+#define uip_closed()    (uip_flags & UIP_CLOSE)
-+#define uip_aborted()   (uip_flags & UIP_ABORT)
-+#define uip_timedout()  (uip_flags & UIP_TIMEDOUT)
-+#define uip_datalen()   uip_len
-+
-+#define uip_send(data, len) do { \
-+	uip_sappdata = (data); \
-+	uip_slen = (len); \
-+} while (0)
-+
-+#define uip_close() do { \
-+	uip_flags |= UIP_CLOSE; \
-+} while (0)
++#define UIP_BUFSIZE     1514
++#define UIP_LLH_LEN     14
 +
 +extern u8_t uip_buf[UIP_BUFSIZE + 2];
 +extern void *uip_appdata;
@@ -302,25 +273,40 @@
 +extern u16_t uip_slen;
 +extern u8_t uip_flags;
 +extern struct uip_tcp_conn *uip_conn;
++#define UIP_TCP_CONNS 4
 +extern struct uip_tcp_conn uip_conns[UIP_TCP_CONNS];
++
++#define UIP_ACKDATA 1
++#define UIP_NEWDATA 2
++#define UIP_CLOSE   4
++#define UIP_ABORT   8
++#define UIP_SEND    16
++
++#define uip_newdata()   (uip_flags & UIP_NEWDATA)
++#define uip_acked()     (uip_flags & UIP_ACKDATA)
++#define uip_connected() (uip_flags & UIP_CLOSE)
++#define uip_closed()    (uip_flags & UIP_CLOSE)
++#define uip_aborted()   (uip_flags & UIP_ABORT)
++#define uip_timedout()  (uip_flags & UIP_ABORT)
++
++#define uip_datalen()   uip_len
 +
 +void uip_init(void);
 +void uip_listen(u16_t port);
 +void uip_input(void);
 +void uip_periodic(int conn);
-+void uip_appcall(void);
-+
-+u16_t uip_chksum(u16_t *buf, u16_t len);
++void uip_send(const void *data, int len);
++void uip_close(void);
++void uip_sethostaddr(uip_ipaddr_t addr);
 +u16_t uip_ipchksum(void);
 +u16_t uip_tcpchksum(void);
 +
-+void uip_sethostaddr(uip_ipaddr_t addr);
-+void uip_setethaddr(struct uip_eth_addr addr);
++void uip_appcall(void);
 +
 +#endif /* __UIP_H__ */
 --- /dev/null
 +++ b/net/uip_arp.c
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,84 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP ARP implementation
@@ -329,6 +315,7 @@
 +#include <linux/types.h>
 +#include <linux/string.h>
 +#include <asm/byteorder.h>
++#include <net.h>
 +#include <net/uip.h>
 +#include <net/uip_arp.h>
 +
@@ -373,9 +360,9 @@
 +		BUF->opcode = htons(ARP_REPLY);
 +
 +		memcpy(BUF->dhwaddr.addr, BUF->shwaddr.addr, 6);
-+		memcpy(BUF->shwaddr.addr, default_ethaddr.addr, 6);
++		memcpy(BUF->shwaddr.addr, net_ethaddr, 6);
 +		memcpy(BUF->ethhdr.dest.addr, BUF->dhwaddr.addr, 6);
-+		memcpy(BUF->ethhdr.src.addr, default_ethaddr.addr, 6);
++		memcpy(BUF->ethhdr.src.addr, net_ethaddr, 6);
 +
 +		BUF->dipaddr[0] = BUF->sipaddr[0];
 +		BUF->dipaddr[1] = BUF->sipaddr[1];
@@ -400,13 +387,13 @@
 +	}
 +
 +	memcpy(IPBUF->dest.addr, client_ethaddr.addr, 6);
-+	memcpy(IPBUF->src.addr, default_ethaddr.addr, 6);
++	memcpy(IPBUF->src.addr, net_ethaddr, 6);
 +	IPBUF->type = htons(UIP_ETHTYPE_IP);
 +	uip_len += UIP_LLH_LEN;
 +}
 --- /dev/null
 +++ b/net/uip.c
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,339 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +/*
 + * Minimal uIP TCP State Machine Implementation
@@ -610,82 +597,78 @@
 +		uip_conn->tcpstateflags = UIP_CLOSED;
 +		uip_conn->tx_ptr = NULL;
 +		uip_conn->tx_left = 0;
-+		uip_flags = UIP_ABORT;
-+		uip_appcall();
 +		uip_len = 0;
 +		return;
 +	}
 +
++	u32_t r_seq = ((u32_t)BUF->seqno[0] << 24) | ((u32_t)BUF->seqno[1] << 16) |
++		      ((u32_t)BUF->seqno[2] << 8) | BUF->seqno[3];
++	u32_t l_ack = ((u32_t)uip_conn->rcv_nxt[0] << 24) | ((u32_t)uip_conn->rcv_nxt[1] << 16) |
++		      ((u32_t)uip_conn->rcv_nxt[2] << 8) | uip_conn->rcv_nxt[3];
++
++	len = (BUF->len[0] << 8) + BUF->len[1] - UIP_IPTCPH_LEN;
++
 +	if (uip_conn->tcpstateflags == UIP_SYN_RCVD) {
 +		if (BUF->flags & TCP_ACK) {
 +			uip_conn->tcpstateflags = UIP_ESTABLISHED;
-+			uip_flags = UIP_CONNECTED;
-+			uip_slen = 0;
-+			uip_appcall();
 +		}
 +	}
 +
-+	u32_t cur_seq = ((u32_t)uip_conn->rcv_nxt[0] << 24) | ((u32_t)uip_conn->rcv_nxt[1] << 16) |
-+			((u32_t)uip_conn->rcv_nxt[2] << 8) | uip_conn->rcv_nxt[3];
-+
-+	len = (BUF->len[0] << 8) | BUF->len[1];
-+	len -= (BUF->vhl & 0x0f) * 4 + ((BUF->tcpoffset >> 4) * 4);
-+
-+	uip_appdata = &uip_buf[UIP_LLH_LEN + (BUF->vhl & 0x0f) * 4 + ((BUF->tcpoffset >> 4) * 4)];
-+	uip_len = len;
-+	uip_slen = 0;
 +	uip_flags = 0;
-+
 +	if (BUF->flags & TCP_ACK) {
 +		uip_flags |= UIP_ACKDATA;
 +	}
 +
 +	if (len > 0) {
 +		uip_flags |= UIP_NEWDATA;
-+		cur_seq += len;
-+		uip_conn->rcv_nxt[0] = cur_seq >> 24;
-+		uip_conn->rcv_nxt[1] = cur_seq >> 16;
-+		uip_conn->rcv_nxt[2] = cur_seq >> 8;
-+		uip_conn->rcv_nxt[3] = cur_seq;
++		uip_appdata = &uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN];
++		uip_len = len;
++
++		l_ack += len;
++		uip_conn->rcv_nxt[0] = l_ack >> 24;
++		uip_conn->rcv_nxt[1] = l_ack >> 16;
++		uip_conn->rcv_nxt[2] = l_ack >> 8;
++		uip_conn->rcv_nxt[3] = l_ack;
 +	}
 +
++	uip_slen = 0;
++	uip_appcall();
++
 +	if (BUF->flags & TCP_FIN) {
++		uip_conn->tcpstateflags = UIP_CLOSE_WAIT;
++		l_ack += 1;
++		uip_conn->rcv_nxt[0] = l_ack >> 24;
++		uip_conn->rcv_nxt[1] = l_ack >> 16;
++		uip_conn->rcv_nxt[2] = l_ack >> 8;
++		uip_conn->rcv_nxt[3] = l_ack;
++
 +		uip_flags |= UIP_CLOSE;
-+		cur_seq += 1;
-+		uip_conn->rcv_nxt[0] = cur_seq >> 24;
-+		uip_conn->rcv_nxt[1] = cur_seq >> 16;
-+		uip_conn->rcv_nxt[2] = cur_seq >> 8;
-+		uip_conn->rcv_nxt[3] = cur_seq;
++		uip_appcall();
++
++		BUF->flags = TCP_FIN | TCP_ACK;
++		u32_t my_seq = ((u32_t)uip_conn->snd_nxt[0] << 24) | ((u32_t)uip_conn->snd_nxt[1] << 16) |
++			       ((u32_t)uip_conn->snd_nxt[2] << 8) | uip_conn->snd_nxt[3];
++		uip_add_ack(my_seq, l_ack);
 +		uip_conn->tcpstateflags = UIP_CLOSED;
 +		uip_conn->tx_ptr = NULL;
 +		uip_conn->tx_left = 0;
++		goto send_pkt;
 +	}
 +
-+	uip_appcall();
-+
-+	if (uip_slen > 0 || (uip_flags & UIP_NEWDATA) || (BUF->flags & TCP_FIN)) {
-+		u32_t snd = ((u32_t)uip_conn->snd_nxt[0] << 24) | ((u32_t)uip_conn->snd_nxt[1] << 16) |
-+			    ((u32_t)uip_conn->snd_nxt[2] << 8) | uip_conn->snd_nxt[3];
-+		u32_t rcv = ((u32_t)uip_conn->rcv_nxt[0] << 24) | ((u32_t)uip_conn->rcv_nxt[1] << 16) |
-+			    ((u32_t)uip_conn->rcv_nxt[2] << 8) | uip_conn->rcv_nxt[3];
-+
-+		uip_add_ack(snd, rcv);
++	if (uip_slen > 0 || (uip_flags & UIP_NEWDATA)) {
 +		BUF->flags = TCP_ACK;
 +		if (uip_slen > 0) {
 +			BUF->flags |= TCP_PSH;
-+			snd += uip_slen;
 +		}
-+		if (uip_flags & UIP_CLOSE) {
-+			BUF->flags |= TCP_FIN;
-+			snd += 1;
-+			uip_conn->tcpstateflags = UIP_CLOSED;
-+			uip_conn->tx_ptr = NULL;
-+			uip_conn->tx_left = 0;
-+		}
-+		uip_conn->snd_nxt[0] = snd >> 24;
-+		uip_conn->snd_nxt[1] = snd >> 16;
-+		uip_conn->snd_nxt[2] = snd >> 8;
-+		uip_conn->snd_nxt[3] = snd;
++		u32_t my_seq = ((u32_t)uip_conn->snd_nxt[0] << 24) | ((u32_t)uip_conn->snd_nxt[1] << 16) |
++			       ((u32_t)uip_conn->snd_nxt[2] << 8) | uip_conn->snd_nxt[3];
++		uip_add_ack(my_seq, l_ack);
++
++		my_seq += uip_slen;
++		uip_conn->snd_nxt[0] = my_seq >> 24;
++		uip_conn->snd_nxt[1] = my_seq >> 16;
++		uip_conn->snd_nxt[2] = my_seq >> 8;
++		uip_conn->snd_nxt[3] = my_seq;
 +		goto send_pkt;
 +	}
 +
@@ -693,39 +676,58 @@
 +	return;
 +
 +send_pkt:
-+	if (uip_slen > 0 && uip_appdata && uip_appdata != &uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN]) {
-+		memcpy(&uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN], uip_appdata, uip_slen);
-+	}
-+
 +	BUF->vhl = 0x45;
 +	BUF->tos = 0;
-+	u16_t total = UIP_IPTCPH_LEN + uip_slen;
-+	BUF->len[0] = total >> 8;
-+	BUF->len[1] = total & 0xff;
-+	BUF->ipid[0] = ++ipid >> 8;
++	BUF->len[0] = (UIP_IPTCPH_LEN + uip_slen) >> 8;
++	BUF->len[1] = (UIP_IPTCPH_LEN + uip_slen) & 0xff;
++	++ipid;
++	BUF->ipid[0] = ipid >> 8;
 +	BUF->ipid[1] = ipid & 0xff;
-+	BUF->ipoffset[0] = 0;
-+	BUF->ipoffset[1] = 0;
++	BUF->ipoffset[0] = BUF->ipoffset[1] = 0;
 +	BUF->ttl = 64;
 +	BUF->proto = UIP_PROTO_TCP;
-+	BUF->srcport = uip_conn->lport;
-+	BUF->destport = uip_conn->rport;
-+	uip_ipaddr_copy(BUF->srcipaddr, hostaddr);
-+	uip_ipaddr_copy(BUF->destipaddr, uip_conn->ripaddr);
++
++	u16_t tmp_ip[2];
++	uip_ipaddr_copy(tmp_ip, BUF->srcipaddr);
++	uip_ipaddr_copy(BUF->srcipaddr, BUF->destipaddr);
++	uip_ipaddr_copy(BUF->destipaddr, tmp_ip);
++
++	u16_t tmp_p = BUF->srcport;
++	BUF->srcport = BUF->destport;
++	BUF->destport = tmp_p;
 +
 +	BUF->tcpoffset = (UIP_TCPH_LEN / 4) << 4;
 +	BUF->wnd[0] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) >> 8;
 +	BUF->wnd[1] = (UIP_BUFSIZE - UIP_IPTCPH_LEN - UIP_LLH_LEN) & 0xff;
-+	BUF->urgp[0] = 0;
-+	BUF->urgp[1] = 0;
++	BUF->urgp[0] = BUF->urgp[1] = 0;
 +
 +	BUF->ipchksum = 0;
 +	BUF->ipchksum = uip_ipchksum();
++
++	uip_len = UIP_IPTCPH_LEN + uip_slen;
 +	BUF->tcpchksum = 0;
-+	uip_len = total;
 +	BUF->tcpchksum = uip_tcpchksum();
 +
 +	uip_arp_out();
++}
++
++void uip_send(const void *data, int len)
++{
++	if (len > 0) {
++		uip_slen = len;
++		if (data != &uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN]) {
++			memcpy(&uip_buf[UIP_LLH_LEN + UIP_IPTCPH_LEN], data, len);
++		}
++	}
++}
++
++void uip_close(void)
++{
++	if (uip_conn) {
++		uip_conn->tcpstateflags = UIP_CLOSED;
++		uip_conn->tx_ptr = NULL;
++		uip_conn->tx_left = 0;
++	}
 +}
 +
 +void uip_periodic(int conn)
@@ -733,7 +735,7 @@
 +}
 --- /dev/null
 +++ b/net/httpd.c
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,393 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Copyright (C) 2026 Dante <dante@seckv.com>
@@ -758,21 +760,18 @@
 +static size_t upload_size = 0;
 +static size_t expected_size = 0;
 +static int in_upload = 0;
++static int upload_mode = 0;
 +static int upload_finished = 0;
 +
-+enum {
++enum fw_type {
 +	FW_TYPE_FIRMWARE = 0,
-+	FW_TYPE_FIP,
-+	FW_TYPE_INITRAMFS,
-+	FW_TYPE_GPT,
-+	FW_TYPE_BL2,
++	FW_TYPE_FIP = 1,
++	FW_TYPE_INITRAMFS = 2,
++	FW_TYPE_GPT = 3,
++	FW_TYPE_BL2 = 4
 +};
 +
-+static int upload_mode = FW_TYPE_FIRMWARE;
-+
-+/* Apple-style Clean Tech 5-in-1 Web Failsafe Dashboard */
-+static const char recovery_page[] =
-+"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>BPi-R4 Web Recovery</title><style>*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif;background:#f0f2f5;color:#1f2937;margin:0;padding:40px 15px}#card{max-width:580px;background:#fff;margin:0 auto;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,0.08);overflow:hidden;border:1px solid #e5e7eb}.hd{padding:20px 24px;border-bottom:1px solid #f3f4f6;display:flex;justify-content:space-between;align-items:center}.title{font-size:18px;font-weight:700;color:#0f172a;letter-spacing:-0.3px}.badge{background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;margin-left:8px}.sub{font-size:12px;color:#64748b;margin-top:2px}.stat{display:flex;align-items:center;font-size:11px;font-weight:600;color:#16a34a;background:#f0fdf4;padding:4px 10px;border-radius:20px;border:1px solid #bbf7d0}.dot{width:7px;height:7px;background:#22c55e;border-radius:50%;margin-right:6px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.4}}.body{padding:24px}.tabs{display:flex;background:#f1f5f9;padding:4px;border-radius:10px;margin-bottom:20px;gap:4px}.tab{flex:1;text-align:center;padding:8px 0;font-size:12px;font-weight:600;color:#64748b;border-radius:7px;cursor:pointer;transition:all .15s}.tab:hover{color:#0f172a}.tab.act{background:#fff;color:#0284c7;box-shadow:0 1px 3px rgba(0,0,0,0.1)}.drop{border:2px dashed #cbd5e1;border-radius:12px;padding:26px 16px;text-align:center;cursor:pointer;background:#f8fafc;transition:all .2s}.drop:hover{border-color:#0284c7;background:#f0f9ff}.icon{font-size:32px;line-height:1;margin-bottom:8px;color:#0284c7}.dtit{font-size:13px;font-weight:600;color:#334155}.dsub{font-size:11px;color:#64748b;margin-top:4px}.finfo{display:none;margin-top:8px;font-size:12px;font-weight:600;color:#0284c7;word-break:break-all}#p{height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;display:none;margin:16px 0 6px}#pb{height:100%;width:0;background:#0284c7;transition:width .1s}#msg{text-align:center;font-size:12px;font-weight:700;color:#0284c7;min-height:18px;margin:6px 0}#btn{width:100%;margin-top:14px;padding:12px;background:#0284c7;color:#fff;border:0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;box-shadow:0 2px 6px rgba(2,132,199,0.25);transition:all .2s}#btn:hover{background:#0369a1}#btn:disabled{background:#94a3b8;cursor:not-allowed;box-shadow:none}#btn.danger{background:#dc2626;box-shadow:0 2px 6px rgba(220,38,38,0.25)}#btn.danger:hover{background:#b91c1c}.tip{margin-top:16px;padding:10px 14px;border-radius:8px;font-size:11px;line-height:16px;background:#fef9c3;border:1px solid #fef08a;color:#854d0e}.tip.dang{background:#fef2f2;border-color:#fecaca;color:#991b1b}.tip b{margin-right:6px}</style></head><body><div id=\"card\"><div class=\"hd\"><div><span class=\"title\">Banana Pi BPi-R4</span><span class=\"badge\">MT7988A</span><div class=\"sub\">Quad-Core A73 \u00b7 4GB DDR4 \u00b7 Web Failsafe</div></div><div class=\"stat\"><span class=\"dot\"></span>192.168.1.1</div></div><div class=\"body\"><div class=\"tabs\"><div class=\"tab act\" onclick=\"s(0)\">\u7cfb\u7edf\u56fa\u4ef6</div><div class=\"tab\" onclick=\"s(1)\">U-Boot</div><div class=\"tab\" onclick=\"s(2)\">RAM \u542f\u52a8</div><div class=\"tab\" onclick=\"s(3)\">GPT \u5206\u533a</div><div class=\"tab\" onclick=\"s(4)\">BL2 \u5f15\u5bfc</div></div><input type=\"file\" id=\"fi\" style=\"display:none\" onchange=\"fc(this)\"><div class=\"drop\" onclick=\"document.getElementById('fi').click()\"><div class=\"icon\">\u2601</div><div class=\"dtit\" id=\"dt\">\u70b9\u51fb\u9009\u62e9\u6216\u62d6\u62fd\u6587\u4ef6\u5230\u6b64\u5904</div><div class=\"dsub\" id=\"ds\">\u652f\u6301\u5b98\u65b9 sysupgrade.itb \u683c\u5f0f\u56fa\u4ef6</div><div class=\"finfo\" id=\"fi_info\"></div></div><div id=\"p\"><div id=\"pb\"></div></div><div id=\"msg\"></div><button id=\"btn\" onclick=\"up()\">\u4e0a\u4f20\u5e76\u5f00\u59cb\u5237\u5199</button><div class=\"tip\" id=\"w\"><b>\u63d0\u793a:</b> \u5237\u5199\u8fc7\u7a0b\u4e2d\u8bf7\u52ff\u65ad\u7535\uff0c\u5199\u5165\u5b8c\u6210\u540e\u8bbe\u5907\u5c06\u81ea\u52a8\u5b89\u5168\u91cd\u542f\u3002</div></div></div><script>var T=['firmware','fip','initramfs','gpt','bl2'];var D=['\u652f\u6301\u5b98\u65b9 sysupgrade.itb \u683c\u5f0f\u56fa\u4ef6','\u652f\u6301 BL31 + U-Boot FIP \u955c\u50cf (.fip)','\u5185\u5b58\u4e2d\u76f4\u63a5\u542f\u52a8 Linux\uff0c\u4e0d\u4fee\u6539\u4efb\u4f55\u78c1\u76d8\u6570\u636e','\u91cd\u5199 MMC \u5b58\u50a8\u8bbe\u5907 GPT \u5206\u533a\u8868 (17KB)','\u9ad8\u5371\uff1a\u5199\u5165 ATF BL2 Preloader \u5f15\u5bfc\u4ee3\u7801'];var B=['\u4e0a\u4f20\u5e76\u5f00\u59cb\u5237\u5199','\u66f4\u65b0 U-Boot FIP','\u76f4\u63a5\u4ece\u5185\u5b58\u542f\u52a8','\u5199\u5165 GPT \u5206\u533a\u8868','\u5f3a\u5236\u5199\u5165 BL2 \u5f15\u5bfc'];var W=['\u5237\u5199\u8fc7\u7a0b\u4e2d\u8bf7\u52ff\u65ad\u7535\uff0c\u5199\u5165\u5b8c\u6210\u540e\u8bbe\u5907\u5c06\u81ea\u52a8\u5b89\u5168\u91cd\u542f\u3002','\u5237\u5199\u9519\u8bef\u7684 FIP \u53ef\u80fd\u5bfc\u81f4 Bootloader \u635f\u574f\uff0c\u8bf7\u52a1\u5fc5\u786e\u8ba4\u955c\u50cf\u3002','\u76f4\u63a5\u5c06\u5185\u6838\u8f7d\u5165\u5185\u5b58\u8fd0\u884c\uff0c\u78c1\u76d8\u4fdd\u6301\u539f\u6837\uff0c\u65ad\u7535\u540e\u5931\u6548\u3002','\u5c06\u8986\u5199\u73b0\u6709\u5b58\u50a8\u4ecb\u8d28\u7684\u5206\u533a\u5e03\u5c40\uff0c\u8bf7\u786e\u4fdd\u955c\u50cf\u4e0e\u4ecb\u8d28\u5339\u914d\uff01','\u9ad8\u5371\uff1a\u5199\u5165\u9519\u8bef\u7684 BL2 \u5c06\u5bfc\u81f4\u8bbe\u5907\u5f7b\u5e95\u53d8\u7816\u65e0\u6cd5\u542f\u52a8\uff01'];var c=0,selF=null;function s(i){c=i;document.querySelectorAll('.tab').forEach(function(e,k){e.className=k===i?'tab act':'tab';});document.getElementById('ds').innerText=D[i];document.getElementById('btn').innerText=B[i];var isD=(i===3||i===4);document.getElementById('btn').className=isD?'danger':'';var w=document.getElementById('w');w.className=isD?'tip dang':'tip';w.innerHTML='<b>'+(isD?'\u8b66\u544a:':'\u63d0\u793a:')+'</b> '+W[i];}function fc(inp){if(!inp.files||!inp.files[0])return;selF=inp.files[0];var sz=(selF.size/1048576).toFixed(2)+' MB';if(selF.size<1048576)sz=(selF.size/1024).toFixed(1)+' KB';var el=document.getElementById('fi_info');el.style.display='block';el.innerText='\u5df2\u9009\u62e9: '+selF.name+' ('+sz+')';}function up(){if(!selF)selF=document.getElementById('fi').files[0];if(!selF){alert('\u8bf7\u5148\u9009\u62e9\u5f85\u4e0a\u4f20\u7684\u6587\u4ef6');return;}document.getElementById('btn').disabled=true;document.getElementById('p').style.display='block';var ok=false,x=new XMLHttpRequest();x.open('POST','/upload?type='+T[c]+'&size='+selF.size,true);x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100);document.getElementById('pb').style.width=p+'%';if(p>=100){ok=true;document.getElementById('msg').innerText=c===2?'\u5185\u6838\u4f20\u8f93\u5b8c\u6210\uff0c\u6b63\u5728\u542f\u52a8...':'\u4f20\u8f93\u5b8c\u6210\uff0c\u6b63\u5728\u6821\u9a8c\u5e76\u5237\u5199...';}else{document.getElementById('msg').innerText='\u4e0a\u4f20\u8fdb\u5ea6: '+p+'%';}};x.onload=function(){ok=true;document.getElementById('msg').innerText=c===2?'\u7cfb\u7edf\u542f\u52a8\u4e2d...':'\u5237\u5199\u5b8c\u6210\uff01\u8bbe\u5907\u5c06\u5728 30 \u79d2\u5185\u91cd\u542f...';};x.onerror=function(){if(!ok){document.getElementById('msg').innerText='\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7\u5237\u65b0\u91cd\u8bd5';document.getElementById('btn').disabled=false;}};x.send(selF);}</script></body></html>";
++static const char recovery_page[] = "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>BPi-R4 Web Recovery</title><style>*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif;background:#f0f2f5;color:#1f2937;margin:0;padding:40px 15px}#card{max-width:580px;background:#fff;margin:0 auto;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,0.08);overflow:hidden;border:1px solid #e5e7eb}.hd{padding:20px 24px;border-bottom:1px solid #f3f4f6;display:flex;justify-content:space-between;align-items:center}.title{font-size:18px;font-weight:700;color:#0f172a;letter-spacing:-0.3px}.badge{background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;margin-left:8px}.sub{font-size:12px;color:#64748b;margin-top:2px}.stat{display:flex;align-items:center;font-size:11px;font-weight:600;color:#16a34a;background:#f0fdf4;padding:4px 10px;border-radius:20px;border:1px solid #bbf7d0}.dot{width:7px;height:7px;background:#22c55e;border-radius:50%;margin-right:6px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.4}}.body{padding:24px}.tabs{display:flex;background:#f1f5f9;padding:4px;border-radius:10px;margin-bottom:20px;gap:4px}.tab{flex:1;text-align:center;padding:8px 0;font-size:12px;font-weight:600;color:#64748b;border-radius:7px;cursor:pointer;transition:all .15s}.tab:hover{color:#0f172a}.tab.act{background:#fff;color:#0284c7;box-shadow:0 1px 3px rgba(0,0,0,0.1)}.drop{border:2px dashed #cbd5e1;border-radius:12px;padding:26px 16px;text-align:center;cursor:pointer;background:#f8fafc;transition:all .2s}.drop:hover{border-color:#0284c7;background:#f0f9ff}.icon{font-size:32px;line-height:1;margin-bottom:8px;color:#0284c7}.dtit{font-size:13px;font-weight:600;color:#334155}.dsub{font-size:11px;color:#64748b;margin-top:4px}.finfo{display:none;margin-top:8px;font-size:12px;font-weight:600;color:#0284c7;word-break:break-all}#p{height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;display:none;margin:16px 0 6px}#pb{height:100%;width:0;background:#0284c7;transition:width .1s}#msg{text-align:center;font-size:12px;font-weight:700;color:#0284c7;min-height:18px;margin:6px 0}#btn{width:100%;margin-top:14px;padding:12px;background:#0284c7;color:#fff;border:0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;box-shadow:0 2px 6px rgba(2,132,199,0.25);transition:all .2s}#btn:hover{background:#0369a1}#btn:disabled{background:#94a3b8;cursor:not-allowed;box-shadow:none}#btn.danger{background:#dc2626;box-shadow:0 2px 6px rgba(220,38,38,0.25)}#btn.danger:hover{background:#b91c1c}.tip{margin-top:16px;padding:10px 14px;border-radius:8px;font-size:11px;line-height:16px;background:#fef9c3;border:1px solid #fef08a;color:#854d0e}.tip.dang{background:#fef2f2;border-color:#fecaca;color:#991b1b}.tip b{margin-right:6px}</style></head><body><div id=\"card\"><div class=\"hd\"><div><span class=\"title\">Banana Pi BPi-R4</span><span class=\"badge\">MT7988A</span><div class=\"sub\">Quad-Core A73 \u00b7 4GB DDR4 \u00b7 Web Failsafe</div></div><div class=\"stat\"><span class=\"dot\"></span>192.168.1.1</div></div><div class=\"body\"><div class=\"tabs\"><div class=\"tab act\" onclick=\"s(0)\">\u7cfb\u7edf\u56fa\u4ef6</div><div class=\"tab\" onclick=\"s(1)\">U-Boot</div><div class=\"tab\" onclick=\"s(2)\">RAM \u542f\u52a8</div><div class=\"tab\" onclick=\"s(3)\">GPT \u5206\u533a</div><div class=\"tab\" onclick=\"s(4)\">BL2 \u5f15\u5bfc</div></div><input type=\"file\" id=\"fi\" style=\"display:none\" onchange=\"fc(this)\"><div class=\"drop\" onclick=\"document.getElementById('fi').click()\"><div class=\"icon\">\u2601</div><div class=\"dtit\" id=\"dt\">\u70b9\u51fb\u9009\u62e9\u6216\u62d6\u62fd\u6587\u4ef6\u5230\u6b64\u5904</div><div class=\"dsub\" id=\"ds\">\u652f\u6301\u5b98\u65b9 sysupgrade.itb \u683c\u5f0f\u56fa\u4ef6</div><div class=\"finfo\" id=\"fi_info\"></div></div><div id=\"p\"><div id=\"pb\"></div></div><div id=\"msg\"></div><button id=\"btn\" onclick=\"up()\">\u4e0a\u4f20\u5e76\u5f00\u59cb\u5237\u5199</button><div class=\"tip\" id=\"w\"><b>\u63d0\u793a:</b> \u5237\u5199\u8fc7\u7a0b\u4e2d\u8bf7\u52ff\u65ad\u7535\uff0c\u5199\u5165\u5b8c\u6210\u540e\u8bbe\u5907\u5c06\u81ea\u52a8\u5b89\u5168\u91cd\u542f\u3002</div></div></div><script>var T=['firmware','fip','initramfs','gpt','bl2'];var D=['\u652f\u6301\u5b98\u65b9 sysupgrade.itb \u683c\u5f0f\u56fa\u4ef6','\u652f\u6301 BL31 + U-Boot FIP \u955c\u50cf (.fip)','\u5185\u5b58\u4e2d\u76f4\u63a5\u542f\u52a8 Linux\uff0c\u4e0d\u4fee\u6539\u4efb\u4f55\u78c1\u76d8\u6570\u636e','\u91cd\u5199 MMC \u5b58\u50a8\u8bbe\u5907 GPT \u5206\u533a\u8868 (17KB)','\u9ad8\u5371\uff1a\u5199\u5165 ATF BL2 Preloader \u5f15\u5bfc\u4ee3\u7801'];var B=['\u4e0a\u4f20\u5e76\u5f00\u59cb\u5237\u5199','\u66f4\u65b0 U-Boot FIP','\u76f4\u63a5\u4ece\u5185\u5b58\u542f\u52a8','\u5199\u5165 GPT \u5206\u533a\u8868','\u5f3a\u5236\u5199\u5165 BL2 \u5f15\u5bfc'];var W=['\u5237\u5199\u8fc7\u7a0b\u4e2d\u8bf7\u52ff\u65ad\u7535\uff0c\u5199\u5165\u5b8c\u6210\u540e\u8bbe\u5907\u5c06\u81ea\u52a8\u5b89\u5168\u91cd\u542f\u3002','\u5237\u5199\u9519\u8bef\u7684 FIP \u53ef\u80fd\u5bfc\u81f4 Bootloader \u635f\u574f\uff0c\u8bf7\u52a1\u5fc5\u786e\u8ba4\u955c\u50cf\u3002','\u76f4\u63a5\u5c06\u5185\u6838\u8f7d\u5165\u5185\u5b58\u8fd0\u884c\uff0c\u78c1\u76d8\u4fdd\u6301\u539f\u6837\uff0c\u65ad\u7535\u540e\u5931\u6548\u3002','\u5c06\u8986\u5199\u73b0\u6709\u5b58\u50a8\u4ecb\u8d28\u7684\u5206\u533a\u5e03\u5c40\uff0c\u8bf7\u786e\u4fdd\u955c\u50cf\u4e0e\u4ecb\u8d28\u5339\u914d\uff01','\u9ad8\u5371\uff1a\u5199\u5165\u9519\u8bef\u7684 BL2 \u5c06\u5bfc\u81f4\u8bbe\u5907\u5f7b\u5e95\u53d8\u7816\u65e0\u6cd5\u542f\u52a8\uff01'];var c=0,selF=null;function s(i){c=i;document.querySelectorAll('.tab').forEach(function(e,k){e.className=k===i?'tab act':'tab';});document.getElementById('ds').innerText=D[i];document.getElementById('btn').innerText=B[i];var isD=(i===3||i===4);document.getElementById('btn').className=isD?'danger':'';var w=document.getElementById('w');w.className=isD?'tip dang':'tip';w.innerHTML='<b>'+(isD?'\u8b66\u544a:':'\u63d0\u793a:')+'</b> '+W[i];}function fc(inp){if(!inp.files||!inp.files[0])return;selF=inp.files[0];var sz=(selF.size/1048576).toFixed(2)+' MB';if(selF.size<1048576)sz=(selF.size/1024).toFixed(1)+' KB';var el=document.getElementById('fi_info');el.style.display='block';el.innerText='\u5df2\u9009\u62e9: '+selF.name+' ('+sz+')';}function up(){if(!selF)selF=document.getElementById('fi').files[0];if(!selF){alert('\u8bf7\u5148\u9009\u62e9\u5f85\u4e0a\u4f20\u7684\u6587\u4ef6');return;}document.getElementById('btn').disabled=true;document.getElementById('p').style.display='block';var ok=false,x=new XMLHttpRequest();x.open('POST','/upload?type='+T[c]+'&size='+selF.size,true);x.upload.onprogress=function(e){var p=Math.round(e.loaded/e.total*100);document.getElementById('pb').style.width=p+'%';if(p>=100){ok=true;document.getElementById('msg').innerText=c===2?'\u5185\u6838\u4f20\u8f93\u5b8c\u6210\uff0c\u6b63\u5728\u542f\u52a8...':'\u4f20\u8f93\u5b8c\u6210\uff0c\u6b63\u5728\u6821\u9a8c\u5e76\u5237\u5199...';}else{document.getElementById('msg').innerText='\u4e0a\u4f20\u8fdb\u5ea6: '+p+'%';}};x.onload=function(){ok=true;document.getElementById('msg').innerText=c===2?'\u7cfb\u7edf\u542f\u52a8\u4e2d...':'\u5237\u5199\u5b8c\u6210\uff01\u8bbe\u5907\u5c06\u5728 30 \u79d2\u5185\u91cd\u542f...';};x.onerror=function(){if(!ok){document.getElementById('msg').innerText='\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7\u5237\u65b0\u91cd\u8bd5';document.getElementById('btn').disabled=false;}};x.send(selF);}</script></body></html>";
 +
 +static const char resp_ok_hdr[] =
 +"HTTP/1.0 200 OK\r\n"
@@ -835,19 +834,23 @@
 +
 +		if (strncmp(data, "POST /upload", 12) == 0) {
 +			upload_mode = FW_TYPE_FIRMWARE;
-+			if (strstr(data, "type=fip"))
-+				upload_mode = FW_TYPE_FIP;
-+			else if (strstr(data, "type=initramfs"))
-+				upload_mode = FW_TYPE_INITRAMFS;
-+			else if (strstr(data, "type=gpt"))
-+				upload_mode = FW_TYPE_GPT;
-+			else if (strstr(data, "type=bl2"))
-+				upload_mode = FW_TYPE_BL2;
-+
-+			char *sz_str = strstr(data, "size=");
 +			expected_size = 0;
-+			if (sz_str) {
-+				expected_size = simple_strtoul(sz_str + 5, NULL, 10);
++
++			char *q = strstr(data, "type=");
++			if (q) {
++				if (strncmp(q + 5, "fip", 3) == 0)
++					upload_mode = FW_TYPE_FIP;
++				else if (strncmp(q + 5, "initramfs", 9) == 0)
++					upload_mode = FW_TYPE_INITRAMFS;
++				else if (strncmp(q + 5, "gpt", 3) == 0)
++					upload_mode = FW_TYPE_GPT;
++				else if (strncmp(q + 5, "bl2", 3) == 0)
++					upload_mode = FW_TYPE_BL2;
++			}
++
++			char *qs = strstr(data, "size=");
++			if (qs) {
++				expected_size = simple_strtoul(qs + 5, NULL, 10);
 +			} else {
 +				char *cl = strstr(data, "Content-Length: ");
 +				if (cl)
@@ -870,8 +873,16 @@
 +				int chunk = uip_datalen() - (body - data);
 +				if (chunk > 0) {
 +					memcpy((void *)upload_addr, body, chunk);
-+					upload_size = chunk;
++					upload_size += chunk;
 +				}
++			}
++
++			if (expected_size > 0 && upload_size >= expected_size) {
++				printf("\nHTTPD: Received all %zu bytes (mode %d).\n", upload_size, upload_mode);
++				in_upload = 0;
++				upload_finished = 1;
++				uip_send((void *)resp_ok_hdr, strlen(resp_ok_hdr));
++				uip_close();
 +			}
 +			return;
 +		}
@@ -887,10 +898,10 @@
 +
 +			if (expected_size > 0 && upload_size >= expected_size) {
 +				printf("\nHTTPD: Received all %zu bytes (mode %d).\n", upload_size, upload_mode);
-+				uip_send((void *)resp_ok_hdr, strlen(resp_ok_hdr));
-+				uip_close();
 +				in_upload = 0;
 +				upload_finished = 1;
++				uip_send((void *)resp_ok_hdr, strlen(resp_ok_hdr));
++				uip_close();
 +			}
 +			return;
 +		}
@@ -917,17 +928,18 @@
 +{
 +	struct uip_eth_addr eaddr;
 +	uip_ipaddr_t ip;
-+	uchar *net_mac = net_ethaddr;
-+
-+	memcpy(eaddr.addr, net_mac, 6);
 +
 +	char *ip_str = env_get("ipaddr");
 +	if (!ip_str)
 +		ip_str = "192.168.1.1";
 +
-+	struct in_addr in;
-+	in = string_to_ip(ip_str);
-+	u32 nip = ntohl(in.s_addr);
++	net_ip = string_to_ip(ip_str);
++	u32 nip = ntohl(net_ip.s_addr);
++
++	if (eth_get_dev())
++		memcpy(net_ethaddr, eth_get_ethaddr(), 6);
++
++	memcpy(eaddr.addr, net_ethaddr, 6);
 +
 +	uip_init();
 +	uip_arp_init();
@@ -1064,28 +1076,43 @@
 +	struct uip_eth_hdr *eth = (struct uip_eth_hdr *)pkt;
 +	u16_t type = ntohs(eth->type);
 +
++	if (type == UIP_ETHTYPE_ARP) {
++		/* Learn client MAC from ARP packet */
++		uip_set_client_ethaddr(eth->src);
++		/* Let U-Boot native arp_receive() handle the ARP reply */
++		return 0;
++	}
++
++	if (type != UIP_ETHTYPE_IP)
++		return 0;
++
++	if (len < UIP_LLH_LEN + 20)
++		return 0;
++
++	struct uip_tcpip_hdr *ip = (struct uip_tcpip_hdr *)(pkt + UIP_LLH_LEN);
++
++	if (ip->proto != UIP_PROTO_TCP) {
++		/* Non-TCP packets (ICMP ping, UDP, etc.) are handled by U-Boot native stack */
++		return 0;
++	}
++
++	/* TCP packet: save client MAC and pass to uIP engine */
++	uip_set_client_ethaddr(eth->src);
++
 +	if (len > UIP_BUFSIZE)
 +		len = UIP_BUFSIZE;
 +
 +	memcpy(uip_buf, pkt, len);
 +	uip_len = len;
 +
-+	if (type == UIP_ETHTYPE_IP) {
-+		uip_arp_ipin();
-+		uip_input();
-+		if (uip_len > 0) {
-+			net_send_packet(uip_buf, uip_len);
-+		}
-+		return 1;
-+	} else if (type == UIP_ETHTYPE_ARP) {
-+		uip_arp_arpin();
-+		if (uip_len > 0) {
-+			net_send_packet(uip_buf, uip_len);
-+		}
-+		return 1;
++	uip_arp_ipin();
++	uip_input();
++	if (uip_len > 0) {
++		net_send_packet(uip_buf, uip_len);
 +	}
 +
-+	return 0;
++	/* Consumed by HTTPD, suppress native U-Boot TCP stack (prevents RST) */
++	return 1;
 +}
 +
 +void httpd_poll_idle(void)
