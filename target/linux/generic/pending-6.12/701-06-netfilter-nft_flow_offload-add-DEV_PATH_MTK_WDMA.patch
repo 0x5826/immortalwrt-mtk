@@ -1,0 +1,42 @@
+commit e9a7b6c5e0b72bdafd8edf2b7d04b4f138457c9c
+Author: Eric Woudstra <ericwouds@gmail.com>
+Date:   Tue Aug 27 10:47:55 2024 +0200
+
+    netfilter: nft_flow_offload: Add DEV_PATH_MTK_WDMA to nft_dev_path_info()
+    
+    In case of using mediatek wireless, in nft_dev_fill_forward_path(), the
+    forward path is filled, ending with mediatek wlan1.
+    
+    Because DEV_PATH_MTK_WDMA is unknown inside nft_dev_path_info() it returns
+    with info.indev = NULL. Then nft_dev_forward_path() returns without
+    setting the direct transmit parameters.
+    
+    This results in a neighbor transmit, and direct transmit not possible.
+    But we want to use it for flow between bridged interfaces.
+    
+    So this patch adds DEV_PATH_MTK_WDMA to nft_dev_path_info() and makes
+    direct transmission possible.
+
+diff --git a/net/netfilter/nft_flow_offload.c b/net/netfilter/nft_flow_offload.c
+index 323c531c7..b9e6d9e6d 100644
+--- a/net/netfilter/nft_flow_offload.c
++++ b/net/netfilter/nft_flow_offload.c
+@@ -105,6 +105,7 @@ static void nft_dev_path_info(const struct net_device_path_stack *stack,
+ 		switch (path->type) {
+ 		case DEV_PATH_ETHERNET:
+ 		case DEV_PATH_DSA:
++		case DEV_PATH_MTK_WDMA:
+ 		case DEV_PATH_VLAN:
+ 		case DEV_PATH_PPPOE:
+ 			info->indev = path->dev;
+@@ -117,6 +118,10 @@ static void nft_dev_path_info(const struct net_device_path_stack *stack,
+ 				i = stack->num_paths;
+ 				break;
+ 			}
++			if (path->type == DEV_PATH_MTK_WDMA) {
++				i = stack->num_paths;
++				break;
++			}
+ 
+ 			/* DEV_PATH_VLAN and DEV_PATH_PPPOE */
+ 			if (info->num_encaps >= NF_FLOW_TABLE_ENCAP_MAX) {

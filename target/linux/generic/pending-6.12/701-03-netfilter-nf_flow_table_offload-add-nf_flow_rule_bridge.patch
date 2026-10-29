@@ -1,0 +1,50 @@
+commit ce2747719aef0b354f71f69ddb1c3add44960306
+Author: Eric Woudstra <ericwouds@gmail.com>
+Date:   Fri Jul 12 07:24:58 2024 +0200
+
+    netfilter :nf_flow_table_offload: Add nf_flow_rule_bridge()
+    
+    Add nf_flow_rule_bridge().
+    
+    It only calls the common rule and adds the redirect.
+    
+    Reviewed-by: Nikolay Aleksandrov <razor@blackwall.org>
+
+diff --git a/include/net/netfilter/nf_flow_table.h b/include/net/netfilter/nf_flow_table.h
+index b09c11c04..fb7a11748 100644
+--- a/include/net/netfilter/nf_flow_table.h
++++ b/include/net/netfilter/nf_flow_table.h
+@@ -366,6 +366,9 @@ void nf_flow_table_offload_flush_cleanup(struct nf_flowtable *flowtable);
+ int nf_flow_table_offload_setup(struct nf_flowtable *flowtable,
+ 				struct net_device *dev,
+ 				enum flow_block_command cmd);
++int nf_flow_rule_bridge(struct net *net, struct flow_offload *flow,
++			enum flow_offload_tuple_dir dir,
++			struct nf_flow_rule *flow_rule);
+ int nf_flow_rule_route_ipv4(struct net *net, struct flow_offload *flow,
+ 			    enum flow_offload_tuple_dir dir,
+ 			    struct nf_flow_rule *flow_rule);
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+index b1966b68c..72876ba94 100644
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -680,6 +680,19 @@ nf_flow_rule_route_common(struct net *net, const struct flow_offload *flow,
+ 	return 0;
+ }
+ 
++int nf_flow_rule_bridge(struct net *net, struct flow_offload *flow,
++			enum flow_offload_tuple_dir dir,
++			struct nf_flow_rule *flow_rule)
++{
++	if (nf_flow_rule_route_common(net, flow, dir, flow_rule) < 0)
++		return -1;
++
++	flow_offload_redirect(net, flow, dir, flow_rule);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(nf_flow_rule_bridge);
++
+ int nf_flow_rule_route_ipv4(struct net *net, struct flow_offload *flow,
+ 			    enum flow_offload_tuple_dir dir,
+ 			    struct nf_flow_rule *flow_rule)
