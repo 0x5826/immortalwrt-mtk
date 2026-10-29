@@ -2,7 +2,7 @@ diff --git a/drivers/net/ethernet/mediatek/mtk_eth_soc.c b/drivers/net/ethernet/
 index d01dd50..b9b741a 100644
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
-@@ -5941,6 +5941,7 @@ static const struct mtk_soc_data mt7986_data = {
+@@ -5941,6 +5941,7 @@ static const struct mtk_soc_data mt7981_data = {
  	.version = 2,
  	.offload_version = 2,
  	.ppe_num = 2,
@@ -10,7 +10,15 @@ index d01dd50..b9b741a 100644
  	.hash_offset = 4,
  	.has_accounting = true,
  	.foe_entry_size = MTK_FOE_ENTRY_V2_SIZE,
-@@ -5971,6 +5972,7 @@ static const struct mtk_soc_data mt7987_data = {
+@@ -5971,6 +5972,7 @@ static const struct mtk_soc_data mt7986_data = {
+ 	.version = 2,
+ 	.offload_version = 2,
+ 	.ppe_num = 2,
++	.foe_entries_shift = 5,
+ 	.hash_offset = 4,
+ 	.has_accounting = true,
+ 	.foe_entry_size = MTK_FOE_ENTRY_V2_SIZE,
+@@ -6001,6 +6003,7 @@ static const struct mtk_soc_data mt7987_data = {
  	.version = 3,
  	.offload_version = 2,
  	.ppe_num = 2,
@@ -18,7 +26,7 @@ index d01dd50..b9b741a 100644
  	.hash_offset = 4,
  	.has_accounting = true,
  	.foe_entry_size = MTK_FOE_ENTRY_V3_SIZE,
-@@ -6001,6 +6003,7 @@ static const struct mtk_soc_data mt7988_data = {
+@@ -6031,6 +6034,7 @@ static const struct mtk_soc_data mt7988_data = {
  	.version = 3,
  	.offload_version = 2,
  	.ppe_num = 3,

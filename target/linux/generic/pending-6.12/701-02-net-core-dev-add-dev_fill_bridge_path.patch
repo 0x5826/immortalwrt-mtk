@@ -103,7 +103,7 @@ index ac6bcb2a0..e3cd00180 100644
 +	if (br_dev->netdev_ops->ndo_fill_forward_path(ctx, path) < 0)
 +		return -1;
 +
-+	if (!ctx->dev || WARN_ON_ONCE(last_dev == ctx->dev))
++	if (!ctx->dev || last_dev == ctx->dev)
 +		return -1;
 +
 +	return dev_fill_forward_path_common(ctx, stack);
